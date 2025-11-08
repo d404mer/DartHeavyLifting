@@ -125,9 +125,12 @@ class OptimizedBarbellTracker:
         blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), blur_sigma)
         
         # Визуализация размытого изображения в режиме отладки
+        # Черно-белый прямоугольник = область поиска после предобработки (grayscale + размытие)
+        # Это то изображение, которое анализирует алгоритм HoughCircles для поиска окружностей
         if config.BARBELL_DEBUG_MODE and debug_frame is not None:
             debug_blur = cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
             if x > 0 or y > 0:
+                # Показываем размытое изображение только если используется область поиска
                 debug_frame[y:y+debug_blur.shape[0], x:x+debug_blur.shape[1]] = debug_blur
         
         # Обнаружение окружностей
@@ -370,8 +373,10 @@ def main():
     print("  'k'/'j' - уменьшить/увеличить размытие")
     if config.BARBELL_DEBUG_MODE:
         print("\n[РЕЖИМ ОТЛАДКИ ВКЛЮЧЕН]")
-        print("Желтый прямоугольник - область поиска")
-        print("Желтые окружности - все найденные окружности")
+        print("Желтый прямоугольник - граница области поиска (между руками)")
+        print("Черно-белый прямоугольник - область поиска после предобработки (grayscale + размытие)")
+        print("  Это изображение анализирует алгоритм для поиска окружностей")
+        print("Желтые окружности - все найденные окружности (алгоритм HoughCircles)")
     
     try:
         while True:
