@@ -61,6 +61,7 @@ class OptimizedBarbellTracker:
         self.frames_without_detection = 0
         self.search_region = None  # Область поиска на основе положения рук
         self.smoothing_factor = smoothing_factor  # Коэффициент экспоненциального сглаживания
+        self.last_radius = None  # Последний радиус для стабильности выбора
         
     def update_search_region(self, left_wrist, right_wrist, frame_shape):
         """
@@ -133,7 +134,7 @@ class OptimizedBarbellTracker:
         circles = cv2.HoughCircles(
             blurred,
             cv2.HOUGH_GRADIENT,
-            dp=1,
+            dp=config.BARBELL_CIRCLE_DP,
             minDist=config.BARBELL_CIRCLE_MIN_DIST,
             param1=config.BARBELL_CIRCLE_PARAM1,
             param2=config.BARBELL_CIRCLE_PARAM2,
@@ -207,7 +208,7 @@ class OptimizedBarbellTracker:
     
     def _select_best_circle(self, circles: np.ndarray) -> Optional[Tuple[int, int, int]]:
         """
-        Выбор лучшей окружности из найденных
+        Улучшенный выбор лучшей окружности из найденных
         
         Args:
             circles: Массив окружностей [(x, y, r), ...]
@@ -221,19 +222,66 @@ class OptimizedBarbellTracker:
         if len(circles) == 1:
             return tuple(circles[0])
         
-        # Если есть последнее известное положение - выбираем ближайшую
-        if self.last_position is not None:
-            distances = []
+        # Если есть последнее известное положение - используем улучшенный алгоритм
+        if self.last_position is not None and self.smoothed_position is not None:
+            best_circle = None
+            best_score = -1
+            
+            last_x, last_y = self.last_position
+            last_radius = None
+            if hasattr(self, 'last_radius'):
+                last_radius = self.last_radius
+            
             for circle in circles:
                 cx, cy, r = circle
-                dist = np.sqrt((cx - self.last_position[0])**2 + (cy - self.last_position[1])**2)
-                distances.append(dist)
-            closest_idx = np.argmin(distances)
-            return tuple(circles[closest_idx])
+                
+                # Оценка по расстоянию до последней позиции
+                position_dist = np.sqrt((cx - last_x)**2 + (cy - last_y)**2)
+                position_score = 1.0 / (1.0 + position_dist / 100.0)  # Нормализуем
+                
+                # Оценка по стабильности радиуса
+                radius_score = 1.0
+                if last_radius is not None:
+                    radius_diff = abs(r - last_radius)
+                    radius_score = 1.0 / (1.0 + radius_diff / 10.0)  # Предпочитаем похожий радиус
+                
+                # Оценка по размеру радиуса (если включено)
+                size_score = 1.0
+                if config.BARBELL_PREFER_LARGER_RADIUS:
+                    # Нормализуем радиус относительно диапазона
+                    radius_range = config.BARBELL_CIRCLE_MAX_RADIUS - config.BARBELL_CIRCLE_MIN_RADIUS
+                    if radius_range > 0:
+                        normalized_radius = (r - config.BARBELL_CIRCLE_MIN_RADIUS) / radius_range
+                        size_score = normalized_radius * 0.3 + 0.7  # Небольшой бонус за больший радиус
+                
+                # Комбинированный score
+                combined_score = (
+                    position_score * config.BARBELL_POSITION_STABILITY_WEIGHT +
+                    radius_score * config.BARBELL_RADIUS_STABILITY_WEIGHT +
+                    size_score * (1.0 - config.BARBELL_POSITION_STABILITY_WEIGHT - config.BARBELL_RADIUS_STABILITY_WEIGHT)
+                )
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_circle = circle
+            
+            if best_circle is not None:
+                # Сохраняем радиус для следующего кадра
+                self.last_radius = best_circle[2]
+                return tuple(best_circle)
         
-        # Иначе выбираем окружность с самым большим радиусом (скорее всего штанга)
-        largest_idx = np.argmax([c[2] for c in circles])
-        return tuple(circles[largest_idx])
+        # Иначе выбираем по размеру радиуса или случайную
+        if config.BARBELL_PREFER_LARGER_RADIUS:
+            largest_idx = np.argmax([c[2] for c in circles])
+            self.last_radius = circles[largest_idx][2]
+            return tuple(circles[largest_idx])
+        else:
+            # Выбираем средний радиус
+            radii = [c[2] for c in circles]
+            avg_radius = np.mean(radii)
+            closest_to_avg_idx = np.argmin([abs(c[2] - avg_radius) for c in circles])
+            self.last_radius = circles[closest_to_avg_idx][2]
+            return tuple(circles[closest_to_avg_idx])
     
     def get_path(self) -> List[Tuple[float, float, float]]:
         """Получение пути штанги"""
@@ -307,13 +355,19 @@ def main():
     
     print("Запуск отслеживания.")
     print("Горячие клавиши:")
+    print("  === Основные ===")
     print("  'q' - выход")
     print("  'c' - очистить путь штанги")
-    print("  'd' - переключить режим отладки обнаружения штанги")
-    print("  '+' - увеличить param2 (строже обнаружение)")
-    print("  '-' - уменьшить param2 (мягче обнаружение)")
-    print("  '[' - уменьшить минимальный радиус")
-    print("  ']' - увеличить максимальный радиус")
+    print("  '1' - полностью отключить трекинг тела (экономия ресурсов)")
+    print("  'l' - переключить трекинг ног (включает трекинг тела если выключен)")
+    print("  'd' - переключить режим отладки")
+    print("  === Настройка штанги ===")
+    print("  'w'/'s' - увеличить/уменьшить param2 (основной параметр)")
+    print("  'e'/'r' - увеличить/уменьшить param1")
+    print("  't'/'y' - уменьшить/увеличить minRadius")
+    print("  'u'/'i' - уменьшить/увеличить maxRadius")
+    print("  'o'/'p' - уменьшить/увеличить minDist")
+    print("  'k'/'j' - уменьшить/увеличить размытие")
     if config.BARBELL_DEBUG_MODE:
         print("\n[РЕЖИМ ОТЛАДКИ ВКЛЮЧЕН]")
         print("Желтый прямоугольник - область поиска")
@@ -331,18 +385,23 @@ def main():
             h, w = frame.shape[:2]
             timestamp = time.time()
             
-            # Конвертация в RGB для MediaPipe
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_rgb.flags.writeable = False
-            
-            # Обработка позы
-            results = pose.process(frame_rgb)
-            
             # Конвертация обратно для отображения
-            frame_rgb.flags.writeable = True
             frame_display = frame.copy()
             
-            if results.pose_landmarks:
+            # Обработка позы только если включен трекинг позы
+            results = None
+            if config.ENABLE_POSE_TRACKING:
+                # Конвертация в RGB для MediaPipe
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_rgb.flags.writeable = False
+                
+                # Обработка позы
+                results = pose.process(frame_rgb)
+                
+                # Конвертация обратно для отображения
+                frame_rgb.flags.writeable = True
+            
+            if results and results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
                 
                 # Получаем координаты в пикселях
@@ -357,51 +416,111 @@ def main():
                 right_knee = (lm[RIGHT_KNEE].x, lm[RIGHT_KNEE].y) if lm[RIGHT_KNEE].visibility > 0.5 else None
                 right_ankle = (lm[RIGHT_ANKLE].x, lm[RIGHT_ANKLE].y) if lm[RIGHT_ANKLE].visibility > 0.5 else None
                 
-                # Получаем координаты запястий для трекинга штанги
-                left_wrist_px = points_px[LEFT_WRIST] if lm[LEFT_WRIST].visibility > 0.5 else None
-                right_wrist_px = points_px[RIGHT_WRIST] if lm[RIGHT_WRIST].visibility > 0.5 else None
+                # Получаем координаты запястий для трекинга штанги (если нужно)
+                left_wrist_px = None
+                right_wrist_px = None
+                if config.BARBELL_USE_SEARCH_REGION:
+                    left_wrist_px = points_px[LEFT_WRIST] if lm[LEFT_WRIST].visibility > 0.5 else None
+                    right_wrist_px = points_px[RIGHT_WRIST] if lm[RIGHT_WRIST].visibility > 0.5 else None
                 
-                # Вычисление углов коленей
+                # Вычисление углов коленей (только если включен трекинг ног)
                 left_knee_angle = None
                 right_knee_angle = None
                 
-                if all([left_hip, left_knee, left_ankle]):
-                    left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
-                
-                if all([right_hip, right_knee, right_ankle]):
-                    right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
+                if config.ENABLE_LEG_TRACKING:
+                    if all([left_hip, left_knee, left_ankle]):
+                        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+                    
+                    if all([right_hip, right_knee, right_ankle]):
+                        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
                 
                 # Обновляем область поиска штанги на основе положения рук
-                if config.BARBELL_USE_SEARCH_REGION:
+                if config.BARBELL_USE_SEARCH_REGION and (left_wrist_px or right_wrist_px):
                     barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
+            else:
+                # Если трекинг позы выключен, отключаем область поиска на основе рук
+                if config.BARBELL_USE_SEARCH_REGION:
+                    barbell_tracker.search_region = None
+            
+            # Обнаружение штанги (всегда работает, независимо от трекинга позы)
+            barbell_pos = barbell_tracker.detect_barbell(frame, timestamp, debug_frame=frame_display if config.BARBELL_DEBUG_MODE else None)
+            
+            # Подготовка данных для UDP
+            if config.ENABLE_POSE_TRACKING and results and results.pose_landmarks:
+                lm = results.pose_landmarks.landmark
+                points_px = [(int(l.x * w), int(l.y * h)) for l in lm]
                 
-                # Обнаружение штанги (передаем frame_display для отладки)
-                barbell_pos = barbell_tracker.detect_barbell(frame, timestamp, debug_frame=frame_display if config.BARBELL_DEBUG_MODE else None)
+                # Получаем координаты ключевых точек для UDP
+                left_knee_coords = list(points_px[LEFT_KNEE]) if (lm[LEFT_KNEE].visibility > 0.5 and config.ENABLE_LEG_TRACKING) else None
+                right_knee_coords = list(points_px[RIGHT_KNEE]) if (lm[RIGHT_KNEE].visibility > 0.5 and config.ENABLE_LEG_TRACKING) else None
                 
-                # Подготовка данных для UDP
+                # Подготовка joints данных
                 joints_data = {str(i): [float(l.x), float(l.y), float(getattr(l, 'z', 0.0))] 
-                              for i, l in enumerate(lm)}
+                              for i, l in enumerate(lm)} if config.ENABLE_LEG_TRACKING else {}
                 
-                # Отправка данных через UDP
-                udp_data = {
-                    "timestamp": timestamp,
-                    "knee_positions": {
-                        "left_knee": list(points_px[LEFT_KNEE]) if left_knee else None,
-                        "right_knee": list(points_px[RIGHT_KNEE]) if right_knee else None,
-                        "left_knee_angle": float(left_knee_angle) if left_knee_angle else None,
-                        "right_knee_angle": float(right_knee_angle) if right_knee_angle else None
-                    },
-                    "joints": joints_data,
-                    "barbell_path": [
-                        {"x": float(x), "y": float(y), "timestamp": float(ts)}
-                        for x, y, ts in barbell_tracker.get_path()
-                    ]
-                }
+                # Получаем углы коленей
+                left_hip = (lm[LEFT_HIP].x, lm[LEFT_HIP].y) if lm[LEFT_HIP].visibility > 0.5 else None
+                left_knee = (lm[LEFT_KNEE].x, lm[LEFT_KNEE].y) if lm[LEFT_KNEE].visibility > 0.5 else None
+                left_ankle = (lm[LEFT_ANKLE].x, lm[LEFT_ANKLE].y) if lm[LEFT_ANKLE].visibility > 0.5 else None
+                right_hip = (lm[RIGHT_HIP].x, lm[RIGHT_HIP].y) if lm[RIGHT_HIP].visibility > 0.5 else None
+                right_knee = (lm[RIGHT_KNEE].x, lm[RIGHT_KNEE].y) if lm[RIGHT_KNEE].visibility > 0.5 else None
+                right_ankle = (lm[RIGHT_ANKLE].x, lm[RIGHT_ANKLE].y) if lm[RIGHT_ANKLE].visibility > 0.5 else None
                 
-                try:
-                    sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (UE_IP, UE_PORT))
-                except Exception as e:
-                    print(f"Ошибка отправки UDP: {e}")
+                left_knee_angle = None
+                right_knee_angle = None
+                if config.ENABLE_LEG_TRACKING:
+                    if all([left_hip, left_knee, left_ankle]):
+                        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+                    if all([right_hip, right_knee, right_ankle]):
+                        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
+            else:
+                # Если трекинг позы выключен - пустые данные
+                left_knee_coords = None
+                right_knee_coords = None
+                left_knee_angle = None
+                right_knee_angle = None
+                joints_data = {}
+            
+            # Отправка данных через UDP
+            udp_data = {
+                "timestamp": timestamp,
+                "knee_positions": {
+                    "left_knee": left_knee_coords,
+                    "right_knee": right_knee_coords,
+                    "left_knee_angle": float(left_knee_angle) if left_knee_angle else None,
+                    "right_knee_angle": float(right_knee_angle) if right_knee_angle else None
+                },
+                "joints": joints_data,
+                "barbell_path": [
+                    {"x": float(x), "y": float(y), "timestamp": float(ts)}
+                    for x, y, ts in barbell_tracker.get_path()
+                ]
+            }
+            
+            try:
+                sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (UE_IP, UE_PORT))
+            except Exception as e:
+                print(f"Ошибка отправки UDP: {e}")
+            
+            # Визуализация скелета (только если включен трекинг позы и ног)
+            if config.ENABLE_POSE_TRACKING and results and results.pose_landmarks and config.ENABLE_LEG_TRACKING:
+                lm = results.pose_landmarks.landmark
+                points_px = [(int(l.x * w), int(l.y * h)) for l in lm]
+                
+                # Получаем углы коленей для визуализации
+                left_hip = (lm[LEFT_HIP].x, lm[LEFT_HIP].y) if lm[LEFT_HIP].visibility > 0.5 else None
+                left_knee = (lm[LEFT_KNEE].x, lm[LEFT_KNEE].y) if lm[LEFT_KNEE].visibility > 0.5 else None
+                left_ankle = (lm[LEFT_ANKLE].x, lm[LEFT_ANKLE].y) if lm[LEFT_ANKLE].visibility > 0.5 else None
+                right_hip = (lm[RIGHT_HIP].x, lm[RIGHT_HIP].y) if lm[RIGHT_HIP].visibility > 0.5 else None
+                right_knee = (lm[RIGHT_KNEE].x, lm[RIGHT_KNEE].y) if lm[RIGHT_KNEE].visibility > 0.5 else None
+                right_ankle = (lm[RIGHT_ANKLE].x, lm[RIGHT_ANKLE].y) if lm[RIGHT_ANKLE].visibility > 0.5 else None
+                
+                left_knee_angle = None
+                right_knee_angle = None
+                if all([left_hip, left_knee, left_ankle]):
+                    left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+                if all([right_hip, right_knee, right_ankle]):
+                    right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
                 
                 # Визуализация скелета
                 for start_idx, end_idx in skeleton_connections:
@@ -429,27 +548,27 @@ def main():
                         else:
                             cv2.circle(frame_display, point, config.JOINT_RADIUS, 
                                       config.COLOR_JOINT, -1)
+            
+            # Визуализация пути штанги (всегда, независимо от трекинга позы)
+            barbell_path = barbell_tracker.get_path()
+            if len(barbell_path) > 1:
+                # Рисуем сглаженные линии между точками
+                smoothed_points = []
+                for i, (x, y, ts) in enumerate(barbell_path):
+                    if i == 0 or i == len(barbell_path) - 1:
+                        smoothed_points.append((int(x), int(y)))
+                    else:
+                        # Простое сглаживание - среднее между соседними точками
+                        prev_x, prev_y, _ = barbell_path[i-1]
+                        next_x, next_y, _ = barbell_path[i+1]
+                        smooth_x = (prev_x + x + next_x) / 3
+                        smooth_y = (prev_y + y + next_y) / 3
+                        smoothed_points.append((int(smooth_x), int(smooth_y)))
                 
-                # Визуализация пути штанги (с дополнительным сглаживанием для плавности)
-                barbell_path = barbell_tracker.get_path()
-                if len(barbell_path) > 1:
-                    # Рисуем сглаженные линии между точками
-                    smoothed_points = []
-                    for i, (x, y, ts) in enumerate(barbell_path):
-                        if i == 0 or i == len(barbell_path) - 1:
-                            smoothed_points.append((int(x), int(y)))
-                        else:
-                            # Простое сглаживание - среднее между соседними точками
-                            prev_x, prev_y, _ = barbell_path[i-1]
-                            next_x, next_y, _ = barbell_path[i+1]
-                            smooth_x = (prev_x + x + next_x) / 3
-                            smooth_y = (prev_y + y + next_y) / 3
-                            smoothed_points.append((int(smooth_x), int(smooth_y)))
-                    
-                    # Рисуем сглаженные линии
-                    for i in range(1, len(smoothed_points)):
-                        cv2.line(frame_display, smoothed_points[i-1], smoothed_points[i],
-                                config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+                # Рисуем сглаженные линии
+                for i in range(1, len(smoothed_points)):
+                    cv2.line(frame_display, smoothed_points[i-1], smoothed_points[i],
+                            config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
             
             # Отображение результата
             cv2.imshow('Barbell & Pose Tracking', frame_display)
@@ -462,21 +581,70 @@ def main():
             elif key == ord('c'):
                 barbell_tracker.clear_path()
                 print("Путь штанги очищен")
-            elif key == ord('d'):
+            elif key == ord('1'):
+                config.ENABLE_POSE_TRACKING = False
+                config.ENABLE_LEG_TRACKING = False
+                print("Трекинг тела: ВЫКЛ (полностью отключен)")
+            elif key == ord('l') or key == ord('L'):
+                if not config.ENABLE_POSE_TRACKING:
+                    # Если трекинг позы выключен, сначала включаем его
+                    config.ENABLE_POSE_TRACKING = True
+                    config.ENABLE_LEG_TRACKING = True
+                    print("Трекинг тела: ВКЛ, Трекинг ног: ВКЛ")
+                else:
+                    config.ENABLE_LEG_TRACKING = not config.ENABLE_LEG_TRACKING
+                    print(f"Трекинг ног: {'ВКЛ' if config.ENABLE_LEG_TRACKING else 'ВЫКЛ'}")
+            elif key == ord('d') or key == ord('D'):
                 config.BARBELL_DEBUG_MODE = not config.BARBELL_DEBUG_MODE
                 print(f"Режим отладки: {'ВКЛ' if config.BARBELL_DEBUG_MODE else 'ВЫКЛ'}")
-            elif key == ord('+') or key == ord('='):
+            # Настройка param2 (основной параметр) - w/s
+            elif key == ord('w') or key == ord('W'):
                 config.BARBELL_CIRCLE_PARAM2 = min(50, config.BARBELL_CIRCLE_PARAM2 + 2)
                 print(f"param2 (строже): {config.BARBELL_CIRCLE_PARAM2}")
-            elif key == ord('-') or key == ord('_'):
+            elif key == ord('s') or key == ord('S'):
                 config.BARBELL_CIRCLE_PARAM2 = max(10, config.BARBELL_CIRCLE_PARAM2 - 2)
                 print(f"param2 (мягче): {config.BARBELL_CIRCLE_PARAM2}")
-            elif key == ord('['):
+            # Настройка param1 - e/r
+            elif key == ord('e') or key == ord('E'):
+                config.BARBELL_CIRCLE_PARAM1 = max(30, config.BARBELL_CIRCLE_PARAM1 - 10)
+                print(f"param1: {config.BARBELL_CIRCLE_PARAM1}")
+            elif key == ord('r') or key == ord('R'):
+                config.BARBELL_CIRCLE_PARAM1 = min(200, config.BARBELL_CIRCLE_PARAM1 + 10)
+                print(f"param1: {config.BARBELL_CIRCLE_PARAM1}")
+            # Настройка minRadius - t/y
+            elif key == ord('t') or key == ord('T'):
                 config.BARBELL_CIRCLE_MIN_RADIUS = max(5, config.BARBELL_CIRCLE_MIN_RADIUS - 5)
                 print(f"minRadius: {config.BARBELL_CIRCLE_MIN_RADIUS}")
-            elif key == ord(']'):
+            elif key == ord('y') or key == ord('Y'):
+                config.BARBELL_CIRCLE_MIN_RADIUS = min(100, config.BARBELL_CIRCLE_MIN_RADIUS + 5)
+                print(f"minRadius: {config.BARBELL_CIRCLE_MIN_RADIUS}")
+            # Настройка maxRadius - u/i
+            elif key == ord('u') or key == ord('U'):
+                config.BARBELL_CIRCLE_MAX_RADIUS = max(20, config.BARBELL_CIRCLE_MAX_RADIUS - 10)
+                print(f"maxRadius: {config.BARBELL_CIRCLE_MAX_RADIUS}")
+            elif key == ord('i') or key == ord('I'):
                 config.BARBELL_CIRCLE_MAX_RADIUS = min(200, config.BARBELL_CIRCLE_MAX_RADIUS + 10)
                 print(f"maxRadius: {config.BARBELL_CIRCLE_MAX_RADIUS}")
+            # Настройка minDist - o/p
+            elif key == ord('o') or key == ord('O'):
+                config.BARBELL_CIRCLE_MIN_DIST = max(20, config.BARBELL_CIRCLE_MIN_DIST - 10)
+                print(f"minDist: {config.BARBELL_CIRCLE_MIN_DIST}")
+            elif key == ord('p') or key == ord('P'):
+                config.BARBELL_CIRCLE_MIN_DIST = min(200, config.BARBELL_CIRCLE_MIN_DIST + 10)
+                print(f"minDist: {config.BARBELL_CIRCLE_MIN_DIST}")
+            # Настройка размытия - k/j
+            elif key == ord('k') or key == ord('K'):
+                # Уменьшить размытие
+                if config.BARBELL_BLUR_SIZE > 5:
+                    config.BARBELL_BLUR_SIZE = max(5, config.BARBELL_BLUR_SIZE - 2)
+                config.BARBELL_BLUR_SIGMA = max(1, config.BARBELL_BLUR_SIGMA - 0.5)
+                print(f"Размытие: size={config.BARBELL_BLUR_SIZE}, sigma={config.BARBELL_BLUR_SIGMA:.1f}")
+            elif key == ord('j') or key == ord('J'):
+                # Увеличить размытие
+                if config.BARBELL_BLUR_SIZE < 15:
+                    config.BARBELL_BLUR_SIZE = min(15, config.BARBELL_BLUR_SIZE + 2)
+                config.BARBELL_BLUR_SIGMA = min(5, config.BARBELL_BLUR_SIGMA + 0.5)
+                print(f"Размытие: size={config.BARBELL_BLUR_SIZE}, sigma={config.BARBELL_BLUR_SIGMA:.1f}")
     
     except KeyboardInterrupt:
         print("\nПрерывание по Ctrl+C")
