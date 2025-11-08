@@ -1,0 +1,206 @@
+"""
+Модуль визуализации позы и пути штанги на видео
+Использует MediaPipe для полной визуализации скелета
+"""
+
+import cv2
+import numpy as np
+import mediapipe as mp
+from typing import Optional, Dict, List, Tuple
+import config
+
+
+class Visualizer:
+    """Класс для визуализации отслеживания на видео"""
+    
+    def __init__(self, pose_tracker=None):
+        """
+        Инициализация визуализатора
+        
+        Args:
+            pose_tracker: Экземпляр PoseTracker для получения соединений скелета
+        """
+        self.color_barbell = config.COLOR_BARBELL_PATH
+        self.color_knee = config.COLOR_KNEE_JOINT
+        self.color_leg_bone = config.COLOR_LEG_BONE
+        self.color_joint = config.COLOR_JOINT
+        self.joint_radius = config.JOINT_RADIUS
+        self.line_thickness = config.LINE_THICKNESS
+        
+        # MediaPipe drawing utilities
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.mp_pose = mp.solutions.pose
+        
+        # Сохраняем ссылку на pose_tracker для получения соединений
+        self.pose_tracker = pose_tracker
+    
+    def draw_frame(self, 
+                   frame: np.ndarray,
+                   pose_data: Optional[Dict],
+                   barbell_position: Optional[Tuple[int, int]],
+                   barbell_path: List[Tuple[float, float, float]]) -> np.ndarray:
+        """
+        Рисование данных отслеживания на кадре
+        
+        Args:
+            frame: Входной кадр
+            pose_data: Данные о позе
+            barbell_position: Текущее положение штанги (x, y)
+            barbell_path: Путь штанги [(x, y, timestamp), ...]
+            
+        Returns:
+            Кадр с наложенной визуализацией
+        """
+        result_frame = frame.copy()
+        
+        # Рисуем путь штанги
+        self._draw_barbell_path(result_frame, barbell_path)
+        
+        # Рисуем текущее положение штанги
+        if barbell_position:
+            self._draw_barbell_position(result_frame, barbell_position)
+        
+        # Рисуем позу (суставы ног)
+        if pose_data:
+            self._draw_legs(result_frame, pose_data)
+        
+        return result_frame
+    
+    def _draw_barbell_path(self, frame: np.ndarray, path: List[Tuple[float, float, float]]):
+        """
+        Рисование пути штанги
+        
+        Args:
+            frame: Кадр для рисования
+            path: Путь штанги [(x, y, timestamp), ...]
+        """
+        if len(path) < 2:
+            return
+        
+        # Рисуем линии между соседними точками пути
+        for i in range(1, len(path)):
+            x1, y1, _ = path[i-1]
+            x2, y2, _ = path[i]
+            
+            # Преобразуем в int
+            pt1 = (int(x1), int(y1))
+            pt2 = (int(x2), int(y2))
+            
+            cv2.line(frame, pt1, pt2, self.color_barbell, self.line_thickness)
+        
+        # Рисуем точки пути (опционально, можно сделать полупрозрачными)
+        for point in path:
+            x, y, _ = point
+            cv2.circle(frame, (int(x), int(y)), 2, self.color_barbell, -1)
+    
+    def _draw_barbell_position(self, frame: np.ndarray, position: Tuple[int, int]):
+        """
+        Рисование текущего положения штанги
+        
+        Args:
+            frame: Кадр для рисования
+            position: Положение штанги (x, y)
+        """
+        x, y = position
+        # Рисуем окружность и крестик для обозначения штанги
+        cv2.circle(frame, (int(x), int(y)), 15, self.color_barbell, 3)
+        cv2.line(frame, (int(x)-10, int(y)), (int(x)+10, int(y)), self.color_barbell, 2)
+        cv2.line(frame, (int(x), int(y)-10), (int(x), int(y)+10), self.color_barbell, 2)
+    
+    def _draw_legs(self, frame: np.ndarray, pose_data: Dict):
+        """
+        Рисование полного скелета через MediaPipe
+        
+        Args:
+            frame: Кадр для рисования
+            pose_data: Данные о позе
+        """
+        if not pose_data.get('landmarks'):
+            return
+        
+        landmarks = pose_data['landmarks']
+        h, w = frame.shape[:2]
+        
+        # Рисуем скелет используя соединения из pose_tracker
+        if self.pose_tracker:
+            skeleton_connections = self.pose_tracker.get_skeleton_connections()
+            
+            # Конвертируем landmarks в пиксели
+            points_px = []
+            for landmark in landmarks.landmark:
+                x = int(landmark.x * w)
+                y = int(landmark.y * h)
+                points_px.append((x, y))
+            
+            # Рисуем линии скелета
+            for start_idx, end_idx in skeleton_connections:
+                if start_idx < len(points_px) and end_idx < len(points_px):
+                    pt1 = points_px[start_idx]
+                    pt2 = points_px[end_idx]
+                    # Проверяем видимость точек
+                    if (landmarks.landmark[start_idx].visibility > 0.5 and 
+                        landmarks.landmark[end_idx].visibility > 0.5):
+                        cv2.line(frame, pt1, pt2, self.color_leg_bone, self.line_thickness)
+            
+            # Рисуем точки суставов (торс, ноги, руки основные)
+            display_points = [
+                # Торс
+                11, 12, 23, 24,
+                # Левая нога
+                25, 27, 29, 31,
+                # Правая нога
+                26, 28, 30, 32,
+                # Руки основные
+                13, 15, 14, 16
+            ]
+            
+            for idx in display_points:
+                if idx < len(points_px) and landmarks.landmark[idx].visibility > 0.5:
+                    point = points_px[idx]
+                    # Колени рисуем другим цветом
+                    if idx in [25, 26]:  # LEFT_KNEE, RIGHT_KNEE
+                        cv2.circle(frame, point, self.joint_radius + 2, self.color_knee, -1)
+                        
+                        # Отображаем угол колена
+                        if idx == 25 and pose_data.get('left_knee_angle'):
+                            angle = pose_data['left_knee_angle']
+                            angle_text = f"{int(angle)}°"
+                            text_pos = (point[0] + 15, point[1] - 15)
+                            cv2.putText(frame, angle_text, text_pos,
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.color_knee, 2)
+                        elif idx == 26 and pose_data.get('right_knee_angle'):
+                            angle = pose_data['right_knee_angle']
+                            angle_text = f"{int(angle)}°"
+                            text_pos = (point[0] + 15, point[1] - 15)
+                            cv2.putText(frame, angle_text, text_pos,
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.color_knee, 2)
+                    else:
+                        cv2.circle(frame, point, self.joint_radius, self.color_joint, -1)
+    
+    def _draw_line(self, frame: np.ndarray, pt1: Tuple[float, float], pt2: Tuple[float, float], color: Tuple[int, int, int]):
+        """
+        Рисование линии между двумя точками
+        
+        Args:
+            frame: Кадр для рисования
+            pt1: Первая точка
+            pt2: Вторая точка
+            color: Цвет линии (BGR)
+        """
+        cv2.line(frame, 
+                (int(pt1[0]), int(pt1[1])),
+                (int(pt2[0]), int(pt2[1])),
+                color, self.line_thickness)
+    
+    def _draw_joint(self, frame: np.ndarray, position: Tuple[float, float], color: Tuple[int, int, int]):
+        """
+        Рисование сустава (точка)
+        
+        Args:
+            frame: Кадр для рисования
+            position: Положение сустава
+            color: Цвет точки (BGR)
+        """
+        cv2.circle(frame, (int(position[0]), int(position[1])), self.joint_radius, color, -1)
+
