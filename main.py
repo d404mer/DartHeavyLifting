@@ -48,13 +48,19 @@ def calculate_angle(a, b, c):
 # Оптимизированный трекер штанги
 # -------------------------
 class OptimizedBarbellTracker:
-    """Оптимизированный трекер штанги с привязкой к рукам спортсмена"""
+    """Оптимизированный трекер штанги с привязкой к рукам спортсмена и сглаживанием"""
     
-    def __init__(self):
+    def __init__(self, smoothing_factor=0.7):
+        """
+        Args:
+            smoothing_factor: Коэффициент сглаживания (0-1), чем больше - тем плавнее, но больше задержка
+        """
         self.path = deque(maxlen=config.MAX_PATH_POINTS)
         self.last_position = None
+        self.smoothed_position = None  # Сглаженное положение
         self.frames_without_detection = 0
         self.search_region = None  # Область поиска на основе положения рук
+        self.smoothing_factor = smoothing_factor  # Коэффициент экспоненциального сглаживания
         
     def update_search_region(self, left_wrist, right_wrist, frame_shape):
         """
@@ -83,24 +89,28 @@ class OptimizedBarbellTracker:
         else:
             self.search_region = None
     
-    def detect_barbell(self, frame: np.ndarray, timestamp: float) -> Optional[Tuple[int, int]]:
+    def detect_barbell(self, frame: np.ndarray, timestamp: float, debug_frame=None) -> Optional[Tuple[int, int]]:
         """
         Обнаружение штанги с оптимизацией
         
         Args:
             frame: Входной кадр (BGR)
             timestamp: Временная метка
+            debug_frame: Кадр для отладки (если нужна визуализация процесса)
             
         Returns:
             Координаты центра штанги (x, y) или None
         """
-        # Используем область поиска если доступна
-        if self.search_region:
+        # Используем область поиска если доступна и включена
+        if config.BARBELL_USE_SEARCH_REGION and self.search_region:
             x, y, w, h = self.search_region
             roi = frame[y:y+h, x:x+w]
             if roi.size == 0:
                 self.search_region = None
                 return None
+            # Рисуем область поиска в режиме отладки
+            if config.BARBELL_DEBUG_MODE and debug_frame is not None:
+                cv2.rectangle(debug_frame, (x, y), (x+w, y+h), (255, 255, 0), 2)
         else:
             roi = frame
             x, y = 0, 0
@@ -109,19 +119,36 @@ class OptimizedBarbellTracker:
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
         # Применение размытия для уменьшения шума
-        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+        blur_size = config.BARBELL_BLUR_SIZE
+        blur_sigma = config.BARBELL_BLUR_SIGMA
+        blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), blur_sigma)
+        
+        # Визуализация размытого изображения в режиме отладки
+        if config.BARBELL_DEBUG_MODE and debug_frame is not None:
+            debug_blur = cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
+            if x > 0 or y > 0:
+                debug_frame[y:y+debug_blur.shape[0], x:x+debug_blur.shape[1]] = debug_blur
         
         # Обнаружение окружностей
         circles = cv2.HoughCircles(
             blurred,
             cv2.HOUGH_GRADIENT,
             dp=1,
-            minDist=50,
+            minDist=config.BARBELL_CIRCLE_MIN_DIST,
             param1=config.BARBELL_CIRCLE_PARAM1,
             param2=config.BARBELL_CIRCLE_PARAM2,
             minRadius=config.BARBELL_CIRCLE_MIN_RADIUS,
             maxRadius=config.BARBELL_CIRCLE_MAX_RADIUS
         )
+        
+        # Визуализация всех найденных окружностей в режиме отладки
+        if config.BARBELL_DEBUG_MODE and debug_frame is not None and circles is not None:
+            circles_int = np.round(circles[0, :]).astype("int")
+            for (cx, cy, r) in circles_int:
+                global_cx = cx + x
+                global_cy = cy + y
+                cv2.circle(debug_frame, (global_cx, global_cy), r, (0, 255, 255), 2)
+                cv2.circle(debug_frame, (global_cx, global_cy), 2, (0, 255, 255), -1)
         
         if circles is not None:
             circles = np.round(circles[0, :]).astype("int")
@@ -135,14 +162,47 @@ class OptimizedBarbellTracker:
                 global_x = cx + x
                 global_y = cy + y
                 
+                # Применяем сглаживание
+                if self.smoothed_position is None:
+                    self.smoothed_position = (float(global_x), float(global_y))
+                else:
+                    # Экспоненциальное сглаживание
+                    smooth_x = self.smoothing_factor * self.smoothed_position[0] + (1 - self.smoothing_factor) * global_x
+                    smooth_y = self.smoothing_factor * self.smoothed_position[1] + (1 - self.smoothing_factor) * global_y
+                    self.smoothed_position = (smooth_x, smooth_y)
+                
                 self.last_position = (global_x, global_y)
                 self.frames_without_detection = 0
-                self.path.append((global_x, global_y, timestamp))
                 
-                return (global_x, global_y)
+                # Добавляем сглаженное положение в путь
+                self.path.append((self.smoothed_position[0], self.smoothed_position[1], timestamp))
+                
+                return (int(self.smoothed_position[0]), int(self.smoothed_position[1]))
         
         # Штанга не обнаружена
         self.frames_without_detection += 1
+        
+        # Если есть сглаженное положение и прошло мало кадров - используем его (предсказание)
+        if self.smoothed_position is not None and self.frames_without_detection < 5:
+            # Используем последнее сглаженное положение с небольшим сдвигом
+            # (простое предсказание на основе последнего движения)
+            if len(self.path) >= 2:
+                # Вычисляем скорость на основе последних двух точек
+                prev_x, prev_y, prev_ts = self.path[-1]
+                prev2_x, prev2_y, prev2_ts = self.path[-2]
+                dt = prev_ts - prev2_ts
+                if dt > 0:
+                    vx = (prev_x - prev2_x) / dt
+                    vy = (prev_y - prev2_y) / dt
+                    # Предсказываем следующее положение
+                    predicted_x = prev_x + vx * (timestamp - prev_ts)
+                    predicted_y = prev_y + vy * (timestamp - prev_ts)
+                    self.path.append((predicted_x, predicted_y, timestamp))
+                    return (int(predicted_x), int(predicted_y))
+            else:
+                # Просто используем последнее сглаженное положение
+                return (int(self.smoothed_position[0]), int(self.smoothed_position[1]))
+        
         return None
     
     def _select_best_circle(self, circles: np.ndarray) -> Optional[Tuple[int, int, int]]:
@@ -183,23 +243,23 @@ class OptimizedBarbellTracker:
         """Очистка пути"""
         self.path.clear()
         self.last_position = None
+        self.smoothed_position = None
         self.frames_without_detection = 0
 
 
-# -------------------------
-# Скелетные соединения (как в примере)
-# -------------------------
+
+# Соединения только для ног (торс + ноги, без рук)
 skeleton_connections = [
-    # Торс
-    (11, 12), (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), 
-    (25, 27), (27, 29), (26, 28), (28, 30),
-    # Руки (только плечо-локоть-запястье)
-    (11, 13), (13, 15),
-    (12, 14), (14, 16)
+    # Торс (только для соединения с ногами)
+    (23, 24),  # Соединение бедер
+    # Левая нога
+    (23, 25), (25, 27), (27, 29), (29, 31),
+    # Правая нога
+    (24, 26), (26, 28), (28, 30), (30, 32)
 ]
 
-# Точки для отображения (как в примере, но добавим колени)
-display_points = [11, 13, 15, 12, 14, 16, 23, 24, 25, 26, 27, 28, 29, 30]
+# Точки для отображения - только ноги
+display_points = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32]  # Бедра, колени, лодыжки, стопы
 
 # Индексы MediaPipe Pose
 LEFT_HIP = 23
@@ -212,12 +272,10 @@ LEFT_WRIST = 15
 RIGHT_WRIST = 16
 
 
-# -------------------------
-# Основной цикл
-# -------------------------
+
 def main():
     """Главная функция"""
-    # Парсинг аргументов
+ 
     parser = argparse.ArgumentParser(description='Отслеживание позы и штанги')
     parser.add_argument('-v', '--video', type=str, default=None,
                        help='Путь к видео файлу (если не указан, используется камера)')
@@ -247,7 +305,19 @@ def main():
     # Инициализация трекера штанги
     barbell_tracker = OptimizedBarbellTracker()
     
-    print("Запуск отслеживания. Нажмите 'q' для выхода, 'c' для очистки пути штанги")
+    print("Запуск отслеживания.")
+    print("Горячие клавиши:")
+    print("  'q' - выход")
+    print("  'c' - очистить путь штанги")
+    print("  'd' - переключить режим отладки обнаружения штанги")
+    print("  '+' - увеличить param2 (строже обнаружение)")
+    print("  '-' - уменьшить param2 (мягче обнаружение)")
+    print("  '[' - уменьшить минимальный радиус")
+    print("  ']' - увеличить максимальный радиус")
+    if config.BARBELL_DEBUG_MODE:
+        print("\n[РЕЖИМ ОТЛАДКИ ВКЛЮЧЕН]")
+        print("Желтый прямоугольник - область поиска")
+        print("Желтые окружности - все найденные окружности")
     
     try:
         while True:
@@ -302,10 +372,11 @@ def main():
                     right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
                 
                 # Обновляем область поиска штанги на основе положения рук
-                barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
+                if config.BARBELL_USE_SEARCH_REGION:
+                    barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
                 
-                # Обнаружение штанги
-                barbell_pos = barbell_tracker.detect_barbell(frame, timestamp)
+                # Обнаружение штанги (передаем frame_display для отладки)
+                barbell_pos = barbell_tracker.detect_barbell(frame, timestamp, debug_frame=frame_display if config.BARBELL_DEBUG_MODE else None)
                 
                 # Подготовка данных для UDP
                 joints_data = {str(i): [float(l.x), float(l.y), float(getattr(l, 'z', 0.0))] 
@@ -359,23 +430,26 @@ def main():
                             cv2.circle(frame_display, point, config.JOINT_RADIUS, 
                                       config.COLOR_JOINT, -1)
                 
-                # Визуализация пути штанги
+                # Визуализация пути штанги (с дополнительным сглаживанием для плавности)
                 barbell_path = barbell_tracker.get_path()
                 if len(barbell_path) > 1:
-                    for i in range(1, len(barbell_path)):
-                        x1, y1, _ = barbell_path[i-1]
-                        x2, y2, _ = barbell_path[i]
-                        cv2.line(frame_display, (int(x1), int(y1)), (int(x2), int(y2)),
+                    # Рисуем сглаженные линии между точками
+                    smoothed_points = []
+                    for i, (x, y, ts) in enumerate(barbell_path):
+                        if i == 0 or i == len(barbell_path) - 1:
+                            smoothed_points.append((int(x), int(y)))
+                        else:
+                            # Простое сглаживание - среднее между соседними точками
+                            prev_x, prev_y, _ = barbell_path[i-1]
+                            next_x, next_y, _ = barbell_path[i+1]
+                            smooth_x = (prev_x + x + next_x) / 3
+                            smooth_y = (prev_y + y + next_y) / 3
+                            smoothed_points.append((int(smooth_x), int(smooth_y)))
+                    
+                    # Рисуем сглаженные линии
+                    for i in range(1, len(smoothed_points)):
+                        cv2.line(frame_display, smoothed_points[i-1], smoothed_points[i],
                                 config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
-                
-                # Рисуем текущее положение штанги
-                if barbell_pos:
-                    bx, by = barbell_pos
-                    cv2.circle(frame_display, (int(bx), int(by)), 15, config.COLOR_BARBELL_PATH, 3)
-                    cv2.line(frame_display, (int(bx)-10, int(by)), (int(bx)+10, int(by)),
-                            config.COLOR_BARBELL_PATH, 2)
-                    cv2.line(frame_display, (int(bx), int(by)-10), (int(bx), int(by)+10),
-                            config.COLOR_BARBELL_PATH, 2)
             
             # Отображение результата
             cv2.imshow('Barbell & Pose Tracking', frame_display)
@@ -388,6 +462,21 @@ def main():
             elif key == ord('c'):
                 barbell_tracker.clear_path()
                 print("Путь штанги очищен")
+            elif key == ord('d'):
+                config.BARBELL_DEBUG_MODE = not config.BARBELL_DEBUG_MODE
+                print(f"Режим отладки: {'ВКЛ' if config.BARBELL_DEBUG_MODE else 'ВЫКЛ'}")
+            elif key == ord('+') or key == ord('='):
+                config.BARBELL_CIRCLE_PARAM2 = min(50, config.BARBELL_CIRCLE_PARAM2 + 2)
+                print(f"param2 (строже): {config.BARBELL_CIRCLE_PARAM2}")
+            elif key == ord('-') or key == ord('_'):
+                config.BARBELL_CIRCLE_PARAM2 = max(10, config.BARBELL_CIRCLE_PARAM2 - 2)
+                print(f"param2 (мягче): {config.BARBELL_CIRCLE_PARAM2}")
+            elif key == ord('['):
+                config.BARBELL_CIRCLE_MIN_RADIUS = max(5, config.BARBELL_CIRCLE_MIN_RADIUS - 5)
+                print(f"minRadius: {config.BARBELL_CIRCLE_MIN_RADIUS}")
+            elif key == ord(']'):
+                config.BARBELL_CIRCLE_MAX_RADIUS = min(200, config.BARBELL_CIRCLE_MAX_RADIUS + 10)
+                print(f"maxRadius: {config.BARBELL_CIRCLE_MAX_RADIUS}")
     
     except KeyboardInterrupt:
         print("\nПрерывание по Ctrl+C")
