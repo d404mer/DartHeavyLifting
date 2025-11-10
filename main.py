@@ -16,6 +16,8 @@ from typing import Optional, Tuple, List
 from collections import deque
 
 import config
+from pose_tracker import PoseTracker
+from visualizer import Visualizer
 
 
 # -------------------------
@@ -62,6 +64,43 @@ class OptimizedBarbellTracker:
         self.search_region = None  # Область поиска на основе положения рук
         self.smoothing_factor = smoothing_factor  # Коэффициент экспоненциального сглаживания
         self.last_radius = None  # Последний радиус для стабильности выбора
+        self.last_confidence = None  # Оценка уверенности последнего детекта
+        self.last_detection_source = None  # Источник детекта: 'hough' | 'contour' | 'predict'
+        self._kalman = None  # Калмановский фильтр для центра штанги
+    
+    class _Kalman2D:
+        """Простой Калман для 2D позиции с моделью постоянной скорости"""
+        def __init__(self, x, y):
+            self.dt = 1 / max(1, config.TARGET_FPS)
+            # Состояние: [x, y, vx, vy]
+            self.x = np.array([[x], [y], [0.0], [0.0]], dtype=np.float32)
+            self.F = np.array([[1, 0, self.dt, 0],
+                               [0, 1, 0, self.dt],
+                               [0, 0, 1, 0],
+                               [0, 0, 0, 1]], dtype=np.float32)
+            self.H = np.array([[1, 0, 0, 0],
+                               [0, 1, 0, 0]], dtype=np.float32)
+            # Ковариации процесса и измерения
+            q = 2.0
+            r = 25.0
+            self.Q = np.eye(4, dtype=np.float32) * q
+            self.R = np.eye(2, dtype=np.float32) * r
+            self.P = np.eye(4, dtype=np.float32) * 100.0
+        
+        def predict(self):
+            self.x = self.F @ self.x
+            self.P = self.F @ self.P @ self.F.T + self.Q
+            return float(self.x[0, 0]), float(self.x[1, 0])
+        
+        def update(self, zx, zy):
+            z = np.array([[zx], [zy]], dtype=np.float32)
+            y = z - (self.H @ self.x)
+            S = self.H @ self.P @ self.H.T + self.R
+            K = self.P @ self.H.T @ np.linalg.inv(S)
+            self.x = self.x + K @ y
+            I = np.eye(self.P.shape[0], dtype=np.float32)
+            self.P = (I - K @ self.H) @ self.P
+            return float(self.x[0, 0]), float(self.x[1, 0])
         
     def update_search_region(self, left_wrist, right_wrist, frame_shape):
         """
@@ -119,10 +158,16 @@ class OptimizedBarbellTracker:
         # Конвертация в grayscale
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Применение размытия для уменьшения шума
+        # Дополнительная предобработка для сложного освещения
+        if config.BARBELL_ENABLE_CLAHE:
+            clahe = cv2.createCLAHE(clipLimit=config.BARBELL_CLAHE_CLIP_LIMIT, tileGridSize=config.BARBELL_CLAHE_TILE_GRID_SIZE)
+            gray = clahe.apply(gray)
+        
+        # Применение median и Gaussian размытия для подавления шума/соляных шумов
         blur_size = config.BARBELL_BLUR_SIZE
         blur_sigma = config.BARBELL_BLUR_SIGMA
-        blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), blur_sigma)
+        median = cv2.medianBlur(gray, 5)
+        blurred = cv2.GaussianBlur(median, (blur_size, blur_size), blur_sigma)
         
         # Визуализация размытого изображения в режиме отладки
         # Черно-белый прямоугольник = область поиска после предобработки (grayscale + размытие)
@@ -144,6 +189,7 @@ class OptimizedBarbellTracker:
             minRadius=config.BARBELL_CIRCLE_MIN_RADIUS,
             maxRadius=config.BARBELL_CIRCLE_MAX_RADIUS
         )
+        detection_source = 'hough'
         
         # Визуализация всех найденных окружностей в режиме отладки
         if config.BARBELL_DEBUG_MODE and debug_frame is not None and circles is not None:
@@ -153,6 +199,38 @@ class OptimizedBarbellTracker:
                 global_cy = cy + y
                 cv2.circle(debug_frame, (global_cx, global_cy), r, (0, 255, 255), 2)
                 cv2.circle(debug_frame, (global_cx, global_cy), 2, (0, 255, 255), -1)
+        
+        # Fallback: поиск по контурам, если HoughCircles не нашел
+        if circles is None and config.BARBELL_ENABLE_CONTOUR_FALLBACK:
+            edges = cv2.Canny(blurred, config.BARBELL_CANNY_THRESHOLD1, config.BARBELL_CANNY_THRESHOLD2)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            best_circle = None
+            best_score = -1.0
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < 50:
+                    continue
+                (cx, cy), r = cv2.minEnclosingCircle(cnt)
+                r = int(r)
+                if r < config.BARBELL_CIRCLE_MIN_RADIUS or r > config.BARBELL_CIRCLE_MAX_RADIUS:
+                    continue
+                # Оценка кругlosti: отношение площади контура к площади описанной окружности
+                circle_area = np.pi * (r ** 2)
+                circularity = float(area) / (circle_area + 1e-6)
+                if circularity < config.BARBELL_MIN_CIRCULARITY:
+                    continue
+                score = circularity * r  # бонус за крупнее и круглее
+                if score > best_score:
+                    best_score = score
+                    best_circle = (int(round(cx)), int(round(cy)), r)
+            if best_circle is not None:
+                circles = np.array([[best_circle]], dtype=np.float32)
+                detection_source = 'contour'
+                if config.BARBELL_DEBUG_MODE and debug_frame is not None:
+                    global_cx = best_circle[0] + x
+                    global_cy = best_circle[1] + y
+                    cv2.circle(debug_frame, (global_cx, global_cy), best_circle[2], (0, 200, 255), 2)
+                    cv2.circle(debug_frame, (global_cx, global_cy), 2, (0, 200, 255), -1)
         
         if circles is not None:
             circles = np.round(circles[0, :]).astype("int")
@@ -166,17 +244,48 @@ class OptimizedBarbellTracker:
                 global_x = cx + x
                 global_y = cy + y
                 
-                # Применяем сглаживание
-                if self.smoothed_position is None:
+                # Отбрасываем явные выбросы по скачку и радиусу (опционально)
+                if config.BARBELL_REJECT_OUTLIERS and self.last_position is not None and self.last_radius is not None:
+                    jump = np.hypot(global_x - self.last_position[0], global_y - self.last_position[1])
+                    radius_delta = abs(int(r) - int(self.last_radius))
+                    if jump > config.BARBELL_MAX_JUMP_PIXELS or radius_delta > config.BARBELL_MAX_RADIUS_DELTA:
+                        if config.BARBELL_USE_KALMAN:
+                            if self._kalman is None:
+                                self._kalman = self._Kalman2D(global_x, global_y)
+                            kx, ky = self._kalman.predict()
+                            self.smoothed_position = (kx, ky)
+                            self.path.append((self.smoothed_position[0], self.smoothed_position[1], timestamp))
+                            self.frames_without_detection = 0
+                            self.last_detection_source = 'predict'
+                            self.last_confidence = 0.5
+                            return (int(self.smoothed_position[0]), int(self.smoothed_position[1]))
+                        # Если Калман выключен — пропускаем отбрасывание, используем измерение напрямую
+                
+                # Быстрое позиционирование без задержки (без Калмана) или с Калманом по конфигу
+                if not config.BARBELL_USE_KALMAN:
                     self.smoothed_position = (float(global_x), float(global_y))
                 else:
-                    # Экспоненциальное сглаживание
-                    smooth_x = self.smoothing_factor * self.smoothed_position[0] + (1 - self.smoothing_factor) * global_x
-                    smooth_y = self.smoothing_factor * self.smoothed_position[1] + (1 - self.smoothing_factor) * global_y
-                    self.smoothed_position = (smooth_x, smooth_y)
+                    if self._kalman is None:
+                        self._kalman = self._Kalman2D(global_x, global_y)
+                    kx, ky = self._kalman.update(global_x, global_y)
+                    if self.smoothed_position is None:
+                        self.smoothed_position = (float(kx), float(ky))
+                    else:
+                        smooth_x = self.smoothing_factor * self.smoothed_position[0] + (1 - self.smoothing_factor) * kx
+                        smooth_y = self.smoothing_factor * self.smoothed_position[1] + (1 - self.smoothing_factor) * ky
+                        self.smoothed_position = (smooth_x, smooth_y)
                 
                 self.last_position = (global_x, global_y)
                 self.frames_without_detection = 0
+                self.last_radius = r
+                # Простая модель уверенности
+                base_conf = 0.9 if detection_source == 'hough' else 0.75
+                if self.last_position is not None and len(self.path) >= 1:
+                    prev_x, prev_y, _ = self.path[-1]
+                    jump = np.hypot(self.smoothed_position[0] - prev_x, self.smoothed_position[1] - prev_y)
+                    base_conf -= min(0.3, jump / 400.0)
+                self.last_confidence = float(max(0.1, min(1.0, base_conf)))
+                self.last_detection_source = detection_source
                 
                 # Добавляем сглаженное положение в путь
                 self.path.append((self.smoothed_position[0], self.smoothed_position[1], timestamp))
@@ -186,7 +295,7 @@ class OptimizedBarbellTracker:
         # Штанга не обнаружена
         self.frames_without_detection += 1
         
-        # Если есть сглаженное положение и прошло мало кадров - используем его (предсказание)
+        # Если есть предыдущее положение и прошло мало кадров - используем предсказание (опционально)
         if self.smoothed_position is not None and self.frames_without_detection < 5:
             # Используем последнее сглаженное положение с небольшим сдвигом
             # (простое предсказание на основе последнего движения)
@@ -196,15 +305,23 @@ class OptimizedBarbellTracker:
                 prev2_x, prev2_y, prev2_ts = self.path[-2]
                 dt = prev_ts - prev2_ts
                 if dt > 0:
-                    vx = (prev_x - prev2_x) / dt
-                    vy = (prev_y - prev2_y) / dt
-                    # Предсказываем следующее положение
-                    predicted_x = prev_x + vx * (timestamp - prev_ts)
-                    predicted_y = prev_y + vy * (timestamp - prev_ts)
-                    self.path.append((predicted_x, predicted_y, timestamp))
-                    return (int(predicted_x), int(predicted_y))
+                    if config.BARBELL_USE_KALMAN:
+                        if self._kalman is None:
+                            self._kalman = self._Kalman2D(prev_x, prev_y)
+                        kx, ky = self._kalman.predict()
+                        self.path.append((kx, ky, timestamp))
+                        self.last_detection_source = 'predict'
+                        self.last_confidence = 0.5
+                        return (int(kx), int(ky))
+                    # Без Калмана — возвращаем последнюю известную позицию без предсказаний
+                    self.path.append((prev_x, prev_y, timestamp))
+                    self.last_detection_source = 'predict'
+                    self.last_confidence = 0.4
+                    return (int(prev_x), int(prev_y))
             else:
                 # Просто используем последнее сглаженное положение
+                self.last_detection_source = 'predict'
+                self.last_confidence = 0.5
                 return (int(self.smoothed_position[0]), int(self.smoothed_position[1]))
         
         return None
@@ -354,7 +471,13 @@ def main():
         return
     
     # Инициализация трекера штанги
-    barbell_tracker = OptimizedBarbellTracker()
+    barbell_tracker = OptimizedBarbellTracker(smoothing_factor=config.BARBELL_SMOOTHING_FACTOR)
+    # Инициализация трекера позы и визуализатора
+    pose_tracker_module = PoseTracker(
+        min_detection_confidence=config.MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=config.MIN_TRACKING_CONFIDENCE
+    )
+    visualizer = Visualizer(pose_tracker=pose_tracker_module)
     
     print("Запуск отслеживания.")
     print("Горячие клавиши:")
@@ -392,103 +515,57 @@ def main():
             
             # Конвертация обратно для отображения
             frame_display = frame.copy()
-            
-            # Обработка позы только если включен трекинг позы
+            # Совместимость со старым кодом (переменная results больше не используется)
             results = None
-            if config.ENABLE_POSE_TRACKING:
-                # Конвертация в RGB для MediaPipe
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_rgb.flags.writeable = False
-                
-                # Обработка позы
-                results = pose.process(frame_rgb)
-                
-                # Конвертация обратно для отображения
-                frame_rgb.flags.writeable = True
             
-            if results and results.pose_landmarks:
-                lm = results.pose_landmarks.landmark
-                
-                # Получаем координаты в пикселях
-                points_px = [(int(l.x * w), int(l.y * h)) for l in lm]
-                
-                # Получаем координаты ключевых точек
-                left_hip = (lm[LEFT_HIP].x, lm[LEFT_HIP].y) if lm[LEFT_HIP].visibility > 0.5 else None
-                left_knee = (lm[LEFT_KNEE].x, lm[LEFT_KNEE].y) if lm[LEFT_KNEE].visibility > 0.5 else None
-                left_ankle = (lm[LEFT_ANKLE].x, lm[LEFT_ANKLE].y) if lm[LEFT_ANKLE].visibility > 0.5 else None
-                
-                right_hip = (lm[RIGHT_HIP].x, lm[RIGHT_HIP].y) if lm[RIGHT_HIP].visibility > 0.5 else None
-                right_knee = (lm[RIGHT_KNEE].x, lm[RIGHT_KNEE].y) if lm[RIGHT_KNEE].visibility > 0.5 else None
-                right_ankle = (lm[RIGHT_ANKLE].x, lm[RIGHT_ANKLE].y) if lm[RIGHT_ANKLE].visibility > 0.5 else None
-                
-                # Получаем координаты запястий для трекинга штанги (если нужно)
-                left_wrist_px = None
-                right_wrist_px = None
-                if config.BARBELL_USE_SEARCH_REGION:
-                    left_wrist_px = points_px[LEFT_WRIST] if lm[LEFT_WRIST].visibility > 0.5 else None
-                    right_wrist_px = points_px[RIGHT_WRIST] if lm[RIGHT_WRIST].visibility > 0.5 else None
-                
-                # Вычисление углов коленей (только если включен трекинг ног)
-                left_knee_angle = None
-                right_knee_angle = None
-                
-                if config.ENABLE_LEG_TRACKING:
-                    if all([left_hip, left_knee, left_ankle]):
-                        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
-                    
-                    if all([right_hip, right_knee, right_ankle]):
-                        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
-                
-                # Обновляем область поиска штанги на основе положения рук
-                if config.BARBELL_USE_SEARCH_REGION and (left_wrist_px or right_wrist_px):
-                    barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
+            # Обработка позы через PoseTracker и обновление ROI штанги
+            pose_data = None
+            left_knee_angle = None
+            right_knee_angle = None
+            left_knee_coords = None
+            right_knee_coords = None
+            if config.ENABLE_POSE_TRACKING:
+                pose_data = pose_tracker_module.process_frame(frame)
+                if pose_data and config.BARBELL_USE_SEARCH_REGION and pose_data.get('all_landmarks'):
+                    lm = pose_data['all_landmarks']
+                    left_wrist_px = None
+                    right_wrist_px = None
+                    if lm[LEFT_WRIST].visibility > 0.5:
+                        left_wrist_px = (int(lm[LEFT_WRIST].x * w), int(lm[LEFT_WRIST].y * h))
+                    if lm[RIGHT_WRIST].visibility > 0.5:
+                        right_wrist_px = (int(lm[RIGHT_WRIST].x * w), int(lm[RIGHT_WRIST].y * h))
+                    if left_wrist_px or right_wrist_px:
+                        barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
+                elif config.BARBELL_USE_SEARCH_REGION:
+                    barbell_tracker.search_region = None
+                if pose_data and config.ENABLE_LEG_TRACKING:
+                    joints = pose_tracker_module.get_leg_joints(pose_data)
+                    left_knee_coords = joints['left_knee']
+                    right_knee_coords = joints['right_knee']
+                    left_knee_angle = joints['left_knee_angle']
+                    right_knee_angle = joints['right_knee_angle']
             else:
-                # Если трекинг позы выключен, отключаем область поиска на основе рук
                 if config.BARBELL_USE_SEARCH_REGION:
                     barbell_tracker.search_region = None
             
             # Обнаружение штанги (всегда работает, независимо от трекинга позы)
             barbell_pos = barbell_tracker.detect_barbell(frame, timestamp, debug_frame=frame_display if config.BARBELL_DEBUG_MODE else None)
             
-            # Подготовка данных для UDP
-            if config.ENABLE_POSE_TRACKING and results and results.pose_landmarks:
-                lm = results.pose_landmarks.landmark
-                points_px = [(int(l.x * w), int(l.y * h)) for l in lm]
-                
-                # Получаем координаты ключевых точек для UDP
-                left_knee_coords = list(points_px[LEFT_KNEE]) if (lm[LEFT_KNEE].visibility > 0.5 and config.ENABLE_LEG_TRACKING) else None
-                right_knee_coords = list(points_px[RIGHT_KNEE]) if (lm[RIGHT_KNEE].visibility > 0.5 and config.ENABLE_LEG_TRACKING) else None
-                
-                # Подготовка joints данных
+            # Подготовка данных для UDP (joints из PoseTracker)
+            joints_data = {}
+            if config.ENABLE_POSE_TRACKING and pose_data and config.ENABLE_LEG_TRACKING and pose_data.get('all_landmarks'):
+                lm = pose_data['all_landmarks']
                 joints_data = {str(i): [float(l.x), float(l.y), float(getattr(l, 'z', 0.0))] 
-                              for i, l in enumerate(lm)} if config.ENABLE_LEG_TRACKING else {}
-                
-                # Получаем углы коленей
-                left_hip = (lm[LEFT_HIP].x, lm[LEFT_HIP].y) if lm[LEFT_HIP].visibility > 0.5 else None
-                left_knee = (lm[LEFT_KNEE].x, lm[LEFT_KNEE].y) if lm[LEFT_KNEE].visibility > 0.5 else None
-                left_ankle = (lm[LEFT_ANKLE].x, lm[LEFT_ANKLE].y) if lm[LEFT_ANKLE].visibility > 0.5 else None
-                right_hip = (lm[RIGHT_HIP].x, lm[RIGHT_HIP].y) if lm[RIGHT_HIP].visibility > 0.5 else None
-                right_knee = (lm[RIGHT_KNEE].x, lm[RIGHT_KNEE].y) if lm[RIGHT_KNEE].visibility > 0.5 else None
-                right_ankle = (lm[RIGHT_ANKLE].x, lm[RIGHT_ANKLE].y) if lm[RIGHT_ANKLE].visibility > 0.5 else None
-                
-                left_knee_angle = None
-                right_knee_angle = None
-                if config.ENABLE_LEG_TRACKING:
-                    if all([left_hip, left_knee, left_ankle]):
-                        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
-                    if all([right_hip, right_knee, right_ankle]):
-                        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
-            else:
-                # Если трекинг позы выключен - пустые данные
-                left_knee_coords = None
-                right_knee_coords = None
-                left_knee_angle = None
-                right_knee_angle = None
-                joints_data = {}
+                               for i, l in enumerate(lm)}
             
             # Отправка данных через UDP
             udp_data = {
                 "timestamp": timestamp,
+                "barbell": {
+                    "position": [int(barbell_pos[0]), int(barbell_pos[1])] if barbell_pos else None,
+                    "confidence": float(barbell_tracker.last_confidence) if barbell_tracker.last_confidence is not None else None,
+                    "source": barbell_tracker.last_detection_source
+                },
                 "knee_positions": {
                     "left_knee": left_knee_coords,
                     "right_knee": right_knee_coords,
@@ -554,26 +631,13 @@ def main():
                             cv2.circle(frame_display, point, config.JOINT_RADIUS, 
                                       config.COLOR_JOINT, -1)
             
-            # Визуализация пути штанги (всегда, независимо от трекинга позы)
-            barbell_path = barbell_tracker.get_path()
-            if len(barbell_path) > 1:
-                # Рисуем сглаженные линии между точками
-                smoothed_points = []
-                for i, (x, y, ts) in enumerate(barbell_path):
-                    if i == 0 or i == len(barbell_path) - 1:
-                        smoothed_points.append((int(x), int(y)))
-                    else:
-                        # Простое сглаживание - среднее между соседними точками
-                        prev_x, prev_y, _ = barbell_path[i-1]
-                        next_x, next_y, _ = barbell_path[i+1]
-                        smooth_x = (prev_x + x + next_x) / 3
-                        smooth_y = (prev_y + y + next_y) / 3
-                        smoothed_points.append((int(smooth_x), int(smooth_y)))
-                
-                # Рисуем сглаженные линии
-                for i in range(1, len(smoothed_points)):
-                    cv2.line(frame_display, smoothed_points[i-1], smoothed_points[i],
-                            config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+            # Полная визуализация через Visualizer (путь штанги + ноги)
+            frame_display = visualizer.draw_frame(
+                frame_display,
+                pose_data if (config.ENABLE_POSE_TRACKING and config.ENABLE_LEG_TRACKING) else None,
+                barbell_pos,
+                barbell_tracker.get_path()
+            )
             
             # Отображение результата
             cv2.imshow('Barbell & Pose Tracking', frame_display)
@@ -659,7 +723,10 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
         sock.close()
-        pose.close()
+        try:
+            pose_tracker_module.release()
+        except Exception:
+            pass
         print("Ресурсы освобождены")
 
 

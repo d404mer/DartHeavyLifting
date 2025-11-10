@@ -8,6 +8,7 @@ import numpy as np
 import mediapipe as mp
 from typing import Optional, Dict, List, Tuple
 import config
+from scipy.signal import savgol_filter
 
 
 class Visualizer:
@@ -78,21 +79,40 @@ class Visualizer:
         if len(path) < 2:
             return
         
-        # Рисуем линии между соседними точками пути
-        for i in range(1, len(path)):
-            x1, y1, _ = path[i-1]
-            x2, y2, _ = path[i]
-            
-            # Преобразуем в int
-            pt1 = (int(x1), int(y1))
-            pt2 = (int(x2), int(y2))
-            
+        xs = np.array([p[0] for p in path], dtype=np.float32)
+        ys = np.array([p[1] for p in path], dtype=np.float32)
+        
+        if config.PATH_SMOOTHING_ENABLED and config.PATH_SMOOTHING_METHOD == "savgol":
+            window = int(config.PATH_SAVGOL_WINDOW)
+            poly = int(config.PATH_SAVGOL_POLYORDER)
+            # Окно должно быть нечетным и не больше длины траектории
+            if window % 2 == 0:
+                window += 1
+            if window > len(xs):
+                window = len(xs) if len(xs) % 2 == 1 else len(xs) - 1
+            if window < (poly + 2):
+                window = poly + 3
+            if window >= 5 and window <= len(xs) and window % 2 == 1:
+                try:
+                    xs_s = savgol_filter(xs, window_length=window, polyorder=poly, mode='interp')
+                    ys_s = savgol_filter(ys, window_length=window, polyorder=poly, mode='interp')
+                    xs_draw, ys_draw = xs_s, ys_s
+                except Exception:
+                    xs_draw, ys_draw = xs, ys
+            else:
+                xs_draw, ys_draw = xs, ys
+        else:
+            xs_draw, ys_draw = xs, ys
+        
+        # Рисуем линии между соседними точками пути (сглаженные)
+        for i in range(1, len(xs_draw)):
+            pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+            pt2 = (int(xs_draw[i]), int(ys_draw[i]))
             cv2.line(frame, pt1, pt2, self.color_barbell, self.line_thickness)
         
-        # Рисуем точки пути (опционально, можно сделать полупрозрачными)
-        for point in path:
-            x, y, _ = point
-            cv2.circle(frame, (int(x), int(y)), 2, self.color_barbell, -1)
+        # Рисуем точки пути
+        for i in range(len(xs_draw)):
+            cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, self.color_barbell, -1)
     
     def _draw_barbell_position(self, frame: np.ndarray, position: Tuple[int, int]):
         """
@@ -103,10 +123,8 @@ class Visualizer:
             position: Положение штанги (x, y)
         """
         x, y = position
-        # Рисуем окружность и крестик для обозначения штанги
-        cv2.circle(frame, (int(x), int(y)), 15, self.color_barbell, 3)
-        cv2.line(frame, (int(x)-10, int(y)), (int(x)+10, int(y)), self.color_barbell, 2)
-        cv2.line(frame, (int(x), int(y)-10), (int(x), int(y)+10), self.color_barbell, 2)
+        # Небольшая заполненная точка без креста и большого кольца
+        cv2.circle(frame, (int(x), int(y)), 6, self.color_barbell, -1)
     
     def _draw_legs(self, frame: np.ndarray, pose_data: Dict):
         """
