@@ -58,9 +58,9 @@ class Visualizer:
         # Рисуем путь штанги
         self._draw_barbell_path(result_frame, barbell_path)
         
-        # Рисуем текущее положение штанги
-        if barbell_position:
-            self._draw_barbell_position(result_frame, barbell_position)
+        # Рисуем текущее положение штанги (отключено)
+        # if barbell_position:
+        #     self._draw_barbell_position(result_frame, barbell_position)
         
         # Рисуем позу (суставы ног)
         if pose_data:
@@ -70,7 +70,7 @@ class Visualizer:
     
     def _draw_barbell_path(self, frame: np.ndarray, path: List[Tuple[float, float, float]]):
         """
-        Рисование пути штанги
+        Рисование пути штанги с опциональным сглаживанием
         
         Args:
             frame: Кадр для рисования
@@ -82,23 +82,12 @@ class Visualizer:
         xs = np.array([p[0] for p in path], dtype=np.float32)
         ys = np.array([p[1] for p in path], dtype=np.float32)
         
-        if config.PATH_SMOOTHING_ENABLED and config.PATH_SMOOTHING_METHOD == "savgol":
-            window = int(config.PATH_SAVGOL_WINDOW)
-            poly = int(config.PATH_SAVGOL_POLYORDER)
-            # Окно должно быть нечетным и не больше длины траектории
-            if window % 2 == 0:
-                window += 1
-            if window > len(xs):
-                window = len(xs) if len(xs) % 2 == 1 else len(xs) - 1
-            if window < (poly + 2):
-                window = poly + 3
-            if window >= 5 and window <= len(xs) and window % 2 == 1:
-                try:
-                    xs_s = savgol_filter(xs, window_length=window, polyorder=poly, mode='interp')
-                    ys_s = savgol_filter(ys, window_length=window, polyorder=poly, mode='interp')
-                    xs_draw, ys_draw = xs_s, ys_s
-                except Exception:
-                    xs_draw, ys_draw = xs, ys
+        # Применяем сглаживание если включено
+        if config.PATH_SMOOTHING_ENABLED:
+            if config.PATH_SMOOTHING_METHOD == "savgol":
+                xs_draw, ys_draw = self._smooth_path_savgol(xs, ys)
+            elif config.PATH_SMOOTHING_METHOD == "moving_average":
+                xs_draw, ys_draw = self._smooth_path_moving_average(xs, ys)
             else:
                 xs_draw, ys_draw = xs, ys
         else:
@@ -110,9 +99,87 @@ class Visualizer:
             pt2 = (int(xs_draw[i]), int(ys_draw[i]))
             cv2.line(frame, pt1, pt2, self.color_barbell, self.line_thickness)
         
-        # Рисуем точки пути
-        for i in range(len(xs_draw)):
+        # Рисуем точки пути (реже, чтобы не перегружать визуализацию)
+        step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
+        for i in range(0, len(xs_draw), step):
             cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, self.color_barbell, -1)
+    
+    def _smooth_path_savgol(self, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Сглаживание пути фильтром Савицкого-Голея
+        
+        Args:
+            xs: Массив X координат
+            ys: Массив Y координат
+            
+        Returns:
+            Сглаженные массивы (xs, ys)
+        """
+        if len(xs) < 5:
+            return xs, ys
+        
+        window = int(config.PATH_SAVGOL_WINDOW)
+        poly = int(config.PATH_SAVGOL_POLYORDER)
+        
+        # Окно должно быть нечетным и не больше длины траектории
+        if window % 2 == 0:
+            window += 1
+        if window > len(xs):
+            window = len(xs) if len(xs) % 2 == 1 else len(xs) - 1
+        if window < (poly + 2):
+            window = poly + 3
+        if window < 5:
+            return xs, ys
+        
+        # Убеждаемся, что окно нечетное
+        if window % 2 == 0:
+            window -= 1
+        if window < 5:
+            return xs, ys
+        
+        try:
+            xs_s = savgol_filter(xs, window_length=window, polyorder=poly, mode='interp')
+            ys_s = savgol_filter(ys, window_length=window, polyorder=poly, mode='interp')
+            return xs_s, ys_s
+        except Exception:
+            return xs, ys
+    
+    def _smooth_path_moving_average(self, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Сглаживание пути скользящим средним
+        
+        Args:
+            xs: Массив X координат
+            ys: Массив Y координат
+            
+        Returns:
+            Сглаженные массивы (xs, ys)
+        """
+        if len(xs) < 3:
+            return xs, ys
+        
+        window = int(getattr(config, 'PATH_MOVING_AVERAGE_WINDOW', 7))
+        
+        # Окно должно быть нечетным и не больше длины траектории
+        if window % 2 == 0:
+            window += 1
+        if window > len(xs):
+            window = len(xs) if len(xs) % 2 == 1 else len(xs) - 1
+        if window < 3:
+            return xs, ys
+        
+        # Применяем скользящее среднее
+        # Используем одномерную свертку с равномерным ядром
+        kernel = np.ones(window) / window
+        
+        # Для краев используем padding
+        xs_padded = np.pad(xs, (window // 2, window // 2), mode='edge')
+        ys_padded = np.pad(ys, (window // 2, window // 2), mode='edge')
+        
+        xs_s = np.convolve(xs_padded, kernel, mode='valid')
+        ys_s = np.convolve(ys_padded, kernel, mode='valid')
+        
+        return xs_s, ys_s
     
     def _draw_barbell_position(self, frame: np.ndarray, position: Tuple[int, int]):
         """
