@@ -542,10 +542,13 @@ def main():
     parser = argparse.ArgumentParser(description='Отслеживание позы и штанги')
     parser.add_argument('-v', '--video', type=str, default=None,
                        help='Путь к видео файлу (если не указан, используется камера)')
+    parser.add_argument('-c', '--camera', type=int, default=None,
+                       help='ID камеры (по умолчанию из config.CAMERA_ID)')
     args = parser.parse_args()
     
     # Инициализация источника видео
     video_path = args.video if args.video else config.DEBUG_VIDEO_PATH
+    camera_id = args.camera if args.camera is not None else config.CAMERA_ID
     
     if video_path:
         if not os.path.exists(video_path):
@@ -554,8 +557,8 @@ def main():
         print(f"Использование видео файла: {video_path}")
         cap = cv2.VideoCapture(video_path)
     else:
-        print(f"Использование камеры с ID: {config.CAMERA_ID}")
-        cap = cv2.VideoCapture(config.CAMERA_ID)
+        print(f"Использование камеры с ID: {camera_id}")
+        cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW if os.name == "nt" else 0)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.VIDEO_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.VIDEO_HEIGHT)
