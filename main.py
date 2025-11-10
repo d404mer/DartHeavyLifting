@@ -67,6 +67,11 @@ class OptimizedBarbellTracker:
         self.last_confidence = None  # Оценка уверенности последнего детекта
         self.last_detection_source = None  # Источник детекта: 'hough' | 'contour' | 'predict'
         self._kalman = None  # Калмановский фильтр для центра штанги
+        # Буфер для легкого подавления микродрожания
+        self._jitter_buffer = deque(maxlen=max(3, int(getattr(config, 'BARBELL_ANTI_JITTER_WINDOW', 3))))
+        # Для авто-очистки при простое
+        self._last_motion_ts = None
+        self._last_motion_pos = None
     
     class _Kalman2D:
         """Простой Калман для 2D позиции с моделью постоянной скорости"""
@@ -240,6 +245,33 @@ class OptimizedBarbellTracker:
             
             if best_circle is not None:
                 cx, cy, r = best_circle
+                # Точное уточнение центра в кольце вокруг найденного круга (уменьшает дрожание центра)
+                if getattr(config, 'BARBELL_REFINE_CENTER', True):
+                    inner = max(1, int(r * float(getattr(config, 'BARBELL_REFINE_RING_INNER', 0.6))))
+                    outer = max(inner + 1, int(r * float(getattr(config, 'BARBELL_REFINE_RING_OUTER', 1.3))))
+                    # Вырезаем локальный квадрат вокруг круга
+                    pad = outer + 2
+                    x0 = max(0, cx - pad)
+                    y0 = max(0, cy - pad)
+                    x1 = min(blurred.shape[1], cx + pad)
+                    y1 = min(blurred.shape[0], cy + pad)
+                    local = blurred[y0:y1, x0:x1]
+                    if local.size > 0:
+                        # Создаем кольцевую маску
+                        mask = np.zeros_like(local, dtype=np.uint8)
+                        cv2.circle(mask, (cx - x0, cy - y0), outer, 255, thickness=-1)
+                        cv2.circle(mask, (cx - x0, cy - y0), inner, 0, thickness=-1)
+                        edges = cv2.Canny(local, int(getattr(config, 'BARBELL_REFINE_CANNY_T1', 60)), int(getattr(config, 'BARBELL_REFINE_CANNY_T2', 180)))
+                        edges = cv2.bitwise_and(edges, mask)
+                        ys, xs = np.where(edges > 0)
+                        if len(xs) > 10:
+                            # Находим окружность по набору точек
+                            pts = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
+                            (ref_cx, ref_cy), ref_r = cv2.minEnclosingCircle(pts)
+                            # Переводим в координаты ROI
+                            cx = int(round(ref_cx + x0))
+                            cy = int(round(ref_cy + y0))
+                            r = int(round(ref_r))
                 # Преобразуем координаты обратно в координаты полного кадра
                 global_x = cx + x
                 global_y = cy + y
@@ -263,7 +295,42 @@ class OptimizedBarbellTracker:
                 
                 # Быстрое позиционирование без задержки (без Калмана) или с Калманом по конфигу
                 if not config.BARBELL_USE_KALMAN:
-                    self.smoothed_position = (float(global_x), float(global_y))
+                    px, py = float(global_x), float(global_y)
+                    # «2-tap» анти-джиттер: используем предыдущее значение только при малой скорости
+                    if getattr(config, 'BARBELL_ANTI_JITTER_2TAP', True) and (self.smoothed_position or self.last_position):
+                        prevx, prevy = (self.smoothed_position or self.last_position)
+                        speed = np.hypot(px - prevx, py - prevy)
+                        low = getattr(config, 'BARBELL_ANTI_JITTER_SPEED_THRESH_LOW', 2.0)
+                        high = getattr(config, 'BARBELL_ANTI_JITTER_SPEED_THRESH_HIGH', 6.0)
+                        w = float(getattr(config, 'BARBELL_ANTI_JITTER_2TAP_WEIGHT', 0.6))
+                        if speed <= low:
+                            # Очень малое движение — удерживаем предыдущее (убирает «шум»)
+                            px, py = float(prevx), float(prevy)
+                        elif speed <= high:
+                            # Малое движение — смешиваем предыдущее и текущее (нулевая доп. задержка)
+                            px = w * px + (1 - w) * prevx
+                            py = w * py + (1 - w) * prevy
+                    # Дополнительный «lock» только по X при очень малой горизонтальной скорости
+                    if getattr(config, 'BARBELL_X_JITTER_LOCK', True) and (self.smoothed_position or self.last_position):
+                        prevx, prevy = (self.smoothed_position or self.last_position)
+                        speed_x = abs(px - prevx)
+                        if speed_x <= float(getattr(config, 'BARBELL_X_LOCK_SPEED', 8.0)):
+                            wx = float(getattr(config, 'BARBELL_X_LOCK_WEIGHT', 0.75))
+                            px = wx * prevx + (1 - wx) * px
+                    # Легкое подавление микродрожания через медиану малого окна
+                    if getattr(config, 'BARBELL_ANTI_JITTER', True):
+                        self._jitter_buffer.append((px, py))
+                        if len(self._jitter_buffer) >= 3:
+                            xs = [p[0] for p in self._jitter_buffer]
+                            ys = [p[1] for p in self._jitter_buffer]
+                            rng_x = max(xs) - min(xs)
+                            rng_y = max(ys) - min(ys)
+                            if rng_x <= getattr(config, 'BARBELL_ANTI_JITTER_MAX_RANGE', 6) and rng_y <= getattr(config, 'BARBELL_ANTI_JITTER_MAX_RANGE', 6):
+                                # Медиана по окну 3/5 минимально задерживает и гасит дрожание
+                                mx = float(np.median(xs))
+                                my = float(np.median(ys))
+                                px, py = mx, my
+                    self.smoothed_position = (px, py)
                 else:
                     if self._kalman is None:
                         self._kalman = self._Kalman2D(global_x, global_y)
@@ -289,6 +356,31 @@ class OptimizedBarbellTracker:
                 
                 # Добавляем сглаженное положение в путь
                 self.path.append((self.smoothed_position[0], self.smoothed_position[1], timestamp))
+                
+                # Обновляем состояние «движется/стоит»
+                if self._last_motion_ts is None or self._last_motion_pos is None:
+                    self._last_motion_ts = timestamp
+                    self._last_motion_pos = (self.smoothed_position[0], self.smoothed_position[1])
+                else:
+                    dx = self.smoothed_position[0] - self._last_motion_pos[0]
+                    dy = self.smoothed_position[1] - self._last_motion_pos[1]
+                    dist = float(np.hypot(dx, dy))
+                    if dist >= float(getattr(config, 'BARBELL_IDLE_MIN_MOVE_PX', 8)):
+                        # Есть движение — обновляем опорную точку и таймер
+                        self._last_motion_pos = (self.smoothed_position[0], self.smoothed_position[1])
+                        self._last_motion_ts = timestamp
+                    else:
+                        # Нет заметного движения — проверим простой
+                        idle_sec = timestamp - self._last_motion_ts
+                        if idle_sec >= float(getattr(config, 'BARBELL_IDLE_CLEAR_SECONDS', 4.5)):
+                            # Очищаем путь и начинаем новый сегмент
+                            self.clear_path()
+                            # Сразу добавим текущую точку как начало нового пути
+                            self.smoothed_position = (float(global_x), float(global_y))
+                            self.path.append((self.smoothed_position[0], self.smoothed_position[1], timestamp))
+                            # Сбросим таймер движения
+                            self._last_motion_ts = timestamp
+                            self._last_motion_pos = (self.smoothed_position[0], self.smoothed_position[1])
                 
                 return (int(self.smoothed_position[0]), int(self.smoothed_position[1]))
         
@@ -355,9 +447,12 @@ class OptimizedBarbellTracker:
             for circle in circles:
                 cx, cy, r = circle
                 
-                # Оценка по расстоянию до последней позиции
-                position_dist = np.sqrt((cx - last_x)**2 + (cy - last_y)**2)
-                position_score = 1.0 / (1.0 + position_dist / 100.0)  # Нормализуем
+                # Анизотропная оценка смещения: горизонталь штрафуем сильнее
+                dx = float(cx - last_x)
+                dy = float(cy - last_y)
+                gx = float(getattr(config, 'BARBELL_X_STABILITY_GAIN', 2.0))
+                position_dist = np.sqrt((gx * dx)**2 + (dy)**2)
+                position_score = 1.0 / (1.0 + position_dist / 100.0)
                 
                 # Оценка по стабильности радиуса
                 radius_score = 1.0
