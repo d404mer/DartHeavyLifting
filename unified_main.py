@@ -14,10 +14,12 @@ import time
 import socket
 import json
 import gc
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Tuple, List
 from collections import deque
+from urllib.parse import parse_qs, unquote
 
 # Импорты из проекта
 import config
@@ -48,15 +50,35 @@ mp_pose = mp.solutions.pose
 
 # -------------------- Утилиты --------------------
 def list_cameras(max_test=6):
-    """Список доступных камер"""
+    """Список доступных камер с реальным видеосигналом"""
     cams = []
     for i in range(max_test):
         cap = cv2.VideoCapture(i, cv2.CAP_DSHOW if os.name == "nt" else 0)
         if cap and cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
+            # Пробуем прочитать несколько кадров для надежности
+            valid_frames = 0
+            total_mean = 0.0
+            for attempt in range(5):
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    frame_mean = frame.mean()
+                    # Проверяем, что кадр не черный (mean > 1.0 для учета шума)
+                    if frame_mean > 1.0:
+                        valid_frames += 1
+                        total_mean += frame_mean
+                    # Небольшая задержка для стабилизации потока
+                    time.sleep(0.05)
+            
+            # Если хотя бы 2 кадра не черные, считаем камеру активной
+            if valid_frames >= 2:
+                avg_mean = total_mean / valid_frames
+                print(f"✅ Камера {i}: активна (средняя яркость: {avg_mean:.1f})")
                 cams.append(i)
+            else:
+                print(f"❌ Камера {i}: открыта, но нет видеосигнала (черные кадры)")
             cap.release()
+        else:
+            print(f"❌ Камера {i}: не открывается")
     return cams
 
 def calculate_angle(a, b, c):
@@ -273,9 +295,26 @@ class CaptureThread(threading.Thread):
         self.cap = None
         self.is_video_file = False
         self.video_fps = 30.0
+        self.use_ffmpeg = False
+        self.ffmpeg_process = None
+        self.ffmpeg_width = getattr(config, "VIDEO_WIDTH", 1920)
+        self.ffmpeg_height = getattr(config, "VIDEO_HEIGHT", 1080)
+        self.ffmpeg_pixel_format = getattr(config, "DECKLINK_DEFAULT_PIXEL_FORMAT", "bgr24")
+        self.ffmpeg_frame_size = self.ffmpeg_width * self.ffmpeg_height * 3
+        self.ffmpeg_stderr_thread = None
         self.open_source(source)
     
     def open_source(self, source):
+        # Захват через ffmpeg (DeckLink)
+        if isinstance(source, str) and source.lower().startswith("decklink:"):
+            try:
+                self._start_decklink_capture(source)
+            except Exception as e:
+                self.use_ffmpeg = False
+                print(f"❌ Не удалось запустить ffmpeg для источника '{source}': {e}")
+            return
+        
+        # Обычный видеофайл
         if isinstance(source, str) and source.lower().endswith((".mp4", ".mov", ".avi")):
             self.cap = cv2.VideoCapture(source)
             self.is_video_file = True
@@ -286,53 +325,223 @@ class CaptureThread(threading.Thread):
             else:
                 self.video_fps = self.target_fps
             print(f"📹 Видео файл открыт, FPS: {self.video_fps:.2f}")
-        else:
-            try:
-                idx = int(source)
-                self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
-                self.is_video_file = False
-            except:
-                self.cap = cv2.VideoCapture(source)
-                self.is_video_file = False
-        if not self.cap.isOpened():
+            return
+        
+        # Попытка открыть числовой индекс (DirectShow/Media Foundation)
+        try:
+            idx = int(source)
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+            self.is_video_file = False
+            
+            if self.cap.isOpened():
+                for _ in range(10):
+                    ret, frame = self.cap.read()
+                    if ret and frame is not None:
+                        if frame.mean() > 1.0:
+                            print(f"✅ Камера {idx} открыта и активна")
+                            break
+                else:
+                    self.cap.release()
+                    print(f"⚠️ DirectShow: камера {idx} открыта, но нет видеосигнала. Пробую Media Foundation...")
+                    try:
+                        self.cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+                        if self.cap.isOpened():
+                            print(f"✅ Media Foundation: камера {idx} открыта")
+                        else:
+                            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+                            print("⚠️ Media Foundation не сработал, использую DirectShow")
+                    except Exception:
+                        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+        except Exception:
+            self.cap = cv2.VideoCapture(source)
+            self.is_video_file = False
+        
+        if not self.use_ffmpeg and (self.cap is None or not self.cap.isOpened()):
             print("❌ Cannot open source:", source)
     
+    def _start_decklink_capture(self, source: str):
+        """Инициализация захвата через ffmpeg с backend DeckLink"""
+        self.use_ffmpeg = True
+        self.is_video_file = False
+        
+        spec = source[len("decklink:"):]
+        if "?" in spec:
+            device_part, query_part = spec.split("?", 1)
+            params = parse_qs(query_part, keep_blank_values=True)
+        else:
+            device_part = spec
+            params = {}
+        
+        device_name = unquote(device_part).strip()
+        if not device_name:
+            device_name = getattr(config, "DECKLINK_DEFAULT_DEVICE", None)
+        if not device_name:
+            device_name = "0"
+        
+        # Параметры потока
+        self.ffmpeg_width = int(params.get("width", [getattr(config, "VIDEO_WIDTH", 1920)])[0])
+        self.ffmpeg_height = int(params.get("height", [getattr(config, "VIDEO_HEIGHT", 1080)])[0])
+        fps_param = params.get("fps") or params.get("framerate")
+        ffmpeg_fps = None
+        if fps_param:
+            try:
+                ffmpeg_fps = float(fps_param[0])
+            except (ValueError, TypeError):
+                ffmpeg_fps = None
+        format_code = params.get("format_code", [getattr(config, "DECKLINK_DEFAULT_FORMAT_CODE", None)])[0]
+        
+        pixel_format = params.get("pix_fmt", [getattr(config, "DECKLINK_DEFAULT_PIXEL_FORMAT", "bgr24")])[0]
+        pixel_format = (pixel_format or "bgr24").lower()
+        if pixel_format != "bgr24":
+            print(f"⚠️ Поддерживается только вывод bgr24. Запрошен '{pixel_format}', использую 'bgr24'.")
+            pixel_format = "bgr24"
+        self.ffmpeg_pixel_format = pixel_format
+        self.ffmpeg_frame_size = self.ffmpeg_width * self.ffmpeg_height * 3
+        
+        ffmpeg_path = getattr(config, "FFMPEG_PATH", "ffmpeg")
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostdin",
+            "-thread_queue_size", "2048",
+            "-f", "decklink",
+        ]
+        if format_code:
+            cmd.extend(["-format_code", format_code])
+        if ffmpeg_fps:
+            cmd.extend(["-framerate", str(ffmpeg_fps)])
+        cmd.extend(["-i", device_name])
+        cmd.extend([
+            "-pix_fmt", pixel_format,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-"
+        ])
+        
+        try:
+            self.ffmpeg_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"FFmpeg не найден по пути '{ffmpeg_path}'. Установите сборку с поддержкой DeckLink.")
+        except Exception as exc:
+            raise RuntimeError(f"Ошибка запуска FFmpeg: {exc}")
+        
+        self.ffmpeg_stderr_thread = threading.Thread(target=self._consume_ffmpeg_stderr, daemon=True)
+        self.ffmpeg_stderr_thread.start()
+        fps_info = ffmpeg_fps if ffmpeg_fps else getattr(config, "TARGET_FPS", 30)
+        print(f"🎥 FFmpeg DeckLink: '{device_name}' -> {self.ffmpeg_width}x{self.ffmpeg_height}@{fps_info}fps")
+    
+    def _consume_ffmpeg_stderr(self):
+        """Вывод предупреждений ffmpeg, чтобы не переполнялся буфер stderr"""
+        if not self.ffmpeg_process or self.ffmpeg_process.stderr is None:
+            return
+        try:
+            for raw_line in self.ffmpeg_process.stderr:
+                if not raw_line:
+                    break
+                try:
+                    line = raw_line.decode("utf-8", "ignore").strip()
+                except Exception:
+                    line = str(raw_line).strip()
+                if line:
+                    print(f"[ffmpeg] {line}")
+        except Exception:
+            pass
+    
+    def _cleanup_capture(self):
+        """Освобождение ресурсов захвата"""
+        if self.use_ffmpeg:
+            if self.ffmpeg_process:
+                try:
+                    if self.ffmpeg_process.stdout:
+                        self.ffmpeg_process.stdout.close()
+                    if self.ffmpeg_process.stderr:
+                        self.ffmpeg_process.stderr.close()
+                except Exception:
+                    pass
+                try:
+                    self.ffmpeg_process.terminate()
+                    self.ffmpeg_process.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        self.ffmpeg_process.kill()
+                    except Exception:
+                        pass
+            self.ffmpeg_process = None
+        else:
+            try:
+                if self.cap:
+                    self.cap.release()
+            except Exception:
+                pass
+        self.cap = None
     def run(self):
-        frame_time = 1.0 / self.video_fps if self.is_video_file else 1.0 / self.target_fps
+        frame_time = 1.0 / self.video_fps if self.is_video_file else 1.0 / max(self.target_fps, 1)
         last_frame_time = time.time()
         
-        while not self.stop_event.is_set():
-            if self.cap is None or not self.cap.isOpened():
-                time.sleep(0.05)
-                continue
-            
-            # Контроль скорости для видео файлов
-            if self.is_video_file:
-                elapsed = time.time() - last_frame_time
-                if elapsed < frame_time:
-                    time.sleep(frame_time - elapsed)
-                last_frame_time = time.time()
-            
-            ret, frame = self.cap.read()
-            if not ret:
-                if self.is_video_file:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    last_frame_time = time.time()
-                    continue
-                time.sleep(0.02)
-                continue
-            try:
-                self.out_q.put(frame, block=False)
-            except queue.Full:
-                try:
-                    _ = self.out_q.get_nowait()
-                    self.out_q.put(frame, block=False)
-                except:
-                    pass
         try:
-            self.cap.release()
-        except:
-            pass
+            while not self.stop_event.is_set():
+                if self.use_ffmpeg:
+                    if not self.ffmpeg_process or self.ffmpeg_process.stdout is None:
+                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                            print("❌ FFmpeg DeckLink: процесс завершился")
+                            break
+                        time.sleep(0.05)
+                        continue
+                    
+                    data = self.ffmpeg_process.stdout.read(self.ffmpeg_frame_size)
+                    if not data or len(data) < self.ffmpeg_frame_size:
+                        if self.stop_event.is_set():
+                            break
+                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                            print("❌ FFmpeg DeckLink: поток остановлен")
+                            break
+                        time.sleep(0.01)
+                        continue
+                    
+                    frame = np.frombuffer(data, dtype=np.uint8)
+                    try:
+                        frame = frame.reshape((self.ffmpeg_height, self.ffmpeg_width, 3))
+                    except ValueError:
+                        # Непредвиденный размер кадра
+                        print("⚠️ FFmpeg DeckLink: Размер кадра не совпадает с ожидаемым")
+                        time.sleep(0.01)
+                        continue
+                else:
+                    if self.cap is None or not self.cap.isOpened():
+                        time.sleep(0.05)
+                        continue
+                    
+                    if self.is_video_file:
+                        elapsed = time.time() - last_frame_time
+                        if elapsed < frame_time:
+                            time.sleep(frame_time - elapsed)
+                        last_frame_time = time.time()
+                    
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        if self.is_video_file:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            last_frame_time = time.time()
+                            continue
+                        time.sleep(0.02)
+                        continue
+                
+                try:
+                    self.out_q.put(frame, block=False)
+                except queue.Full:
+                    try:
+                        _ = self.out_q.get_nowait()
+                        self.out_q.put(frame, block=False)
+                    except Exception:
+                        pass
+        finally:
+            self._cleanup_capture()
 
 class ProcThread(threading.Thread):
     """Поток обработки (MediaPipe + трекинг штанги)"""
