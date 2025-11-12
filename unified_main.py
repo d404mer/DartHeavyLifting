@@ -50,35 +50,15 @@ mp_pose = mp.solutions.pose
 
 # -------------------- Утилиты --------------------
 def list_cameras(max_test=6):
-    """Список доступных камер с реальным видеосигналом"""
+    """Список доступных камер через OpenCV"""
     cams = []
     for i in range(max_test):
         cap = cv2.VideoCapture(i, cv2.CAP_DSHOW if os.name == "nt" else 0)
         if cap and cap.isOpened():
-            # Пробуем прочитать несколько кадров для надежности
-            valid_frames = 0
-            total_mean = 0.0
-            for attempt in range(5):
-                ret, frame = cap.read()
-                if ret and frame is not None and frame.size > 0:
-                    frame_mean = frame.mean()
-                    # Проверяем, что кадр не черный (mean > 1.0 для учета шума)
-                    if frame_mean > 1.0:
-                        valid_frames += 1
-                        total_mean += frame_mean
-                    # Небольшая задержка для стабилизации потока
-                    time.sleep(0.05)
-            
-            # Если хотя бы 2 кадра не черные, считаем камеру активной
-            if valid_frames >= 2:
-                avg_mean = total_mean / valid_frames
-                print(f"✅ Камера {i}: активна (средняя яркость: {avg_mean:.1f})")
+            ret, _ = cap.read()
+            if ret:
                 cams.append(i)
-            else:
-                print(f"❌ Камера {i}: открыта, но нет видеосигнала (черные кадры)")
             cap.release()
-        else:
-            print(f"❌ Камера {i}: не открывается")
     return cams
 
 def calculate_angle(a, b, c):
@@ -330,28 +310,57 @@ class CaptureThread(threading.Thread):
         # Попытка открыть числовой индекс (DirectShow/Media Foundation)
         try:
             idx = int(source)
-            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
             self.is_video_file = False
             
+            # Получаем параметры из config
+            target_width = getattr(config, "VIDEO_WIDTH", 1920)
+            target_height = getattr(config, "VIDEO_HEIGHT", 1080)
+            target_fps = getattr(config, "TARGET_FPS", 50)
+            
+            # Пробуем DirectShow сначала
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+            
             if self.cap.isOpened():
-                for _ in range(10):
-                    ret, frame = self.cap.read()
-                    if ret and frame is not None:
-                        if frame.mean() > 1.0:
-                            print(f"✅ Камера {idx} открыта и активна")
-                            break
-                else:
-                    self.cap.release()
-                    print(f"⚠️ DirectShow: камера {idx} открыта, но нет видеосигнала. Пробую Media Foundation...")
-                    try:
-                        self.cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
-                        if self.cap.isOpened():
-                            print(f"✅ Media Foundation: камера {idx} открыта")
-                        else:
-                            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
-                            print("⚠️ Media Foundation не сработал, использую DirectShow")
-                    except Exception:
-                        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+                # Пробуем установить параметры
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
+                self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+                
+                # Пропускаем несколько кадров для стабилизации
+                for _ in range(5):
+                    ret, _ = self.cap.read()
+                    if not ret:
+                        break
+                
+                # Проверяем реальные параметры
+                actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                
+                print(f"✅ Камера {idx} открыта через DirectShow")
+                print(f"   Разрешение: {actual_width}x{actual_height}, FPS: {actual_fps:.2f}")
+            else:
+                # Если DirectShow не сработал, пробуем Media Foundation
+                try:
+                    self.cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+                    if self.cap.isOpened():
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
+                        self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+                        
+                        for _ in range(5):
+                            ret, _ = self.cap.read()
+                            if not ret:
+                                break
+                        
+                        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                        
+                        print(f"✅ Камера {idx} открыта через Media Foundation")
+                        print(f"   Разрешение: {actual_width}x{actual_height}, FPS: {actual_fps:.2f}")
+                except Exception as e:
+                    print(f"⚠️ Media Foundation не сработал: {e}")
         except Exception:
             self.cap = cv2.VideoCapture(source)
             self.is_video_file = False
