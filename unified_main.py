@@ -449,10 +449,22 @@ class UnifiedTrackingApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Unified Pose & Barbell Tracking")
-        self.root.geometry("1200x700")
+        # Размеры окна
+        window_width = 1200
+        window_height = 1100
+        
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        
+        # Устанавливаем геометрию с позиционированием
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
         # Получаем список камер
         self.camera_list = list_cameras()
+    
         
         # Создаем GUI
         self.gui = AppGUI(self.root, self.camera_list)
