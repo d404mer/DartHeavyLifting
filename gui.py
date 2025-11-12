@@ -70,12 +70,27 @@ class AppGUI:
         self.style.configure('TLabel', background='#2b2b2b', foreground='white')
         self.style.configure('TLabelframe', background='#2b2b2b', foreground='white')
         self.style.configure('TLabelframe.Label', background='#2b2b2b', foreground='white')
-        self.style.configure('TButton', background='#404040', foreground='white')
+        self.style.configure('TButton', background='#404040', foreground='black')  # Изменено на черный
         self.style.configure('TCheckbutton', background='#2b2b2b', foreground='white')
-        self.style.configure('TCombobox', background='#404040', foreground='white')
-        self.style.configure('TEntry', background='#404040', foreground='white')
+        self.style.configure('TCombobox', background='#404040', foreground='black')  # Изменено на черный
+        self.style.configure('TEntry', background='#404040', foreground='black')  # Изменено на черный
         self.style.configure('TScale', background='#2b2b2b')
         self.style.configure('TRadiobutton', background='#2b2b2b', foreground='white')
+        
+        # Дополнительные настройки для лучшей читаемости
+        self.style.map('TButton',
+                      foreground=[('pressed', 'black'), ('active', 'black')],
+                      background=[('pressed', '!disabled', '#505050'), ('active', '#484848')])
+        
+        self.style.map('TCombobox',
+                      fieldbackground=[('readonly', '#404040')],
+                      selectbackground=[('readonly', '#505050')],
+                      selectforeground=[('readonly', 'black')])
+        
+        self.style.map('TEntry',
+                      fieldbackground=[('readonly', '#404040')],
+                      selectbackground=[('readonly', '#505050')],
+                      selectforeground=[('readonly', 'black')])
         
     def _create_widgets(self):
         """Создание всех виджетов интерфейса"""
