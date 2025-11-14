@@ -20,6 +20,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Tuple, List
 from collections import deque
 from urllib.parse import parse_qs, unquote
+from PIL import ImageFont, ImageDraw, Image
 
 # Импорты из проекта
 import config
@@ -266,7 +267,7 @@ class OptimizedBarbellTracker:
 # -------------------- Потоки обработки --------------------
 class CaptureThread(threading.Thread):
     """Поток захвата видео"""
-    def __init__(self, source, out_q, stop_event, target_fps=30):
+    def __init__(self, source, out_q, stop_event, target_fps=50):
         super().__init__(daemon=True)
         self.source = source
         self.out_q = out_q
@@ -274,7 +275,7 @@ class CaptureThread(threading.Thread):
         self.target_fps = target_fps
         self.cap = None
         self.is_video_file = False
-        self.video_fps = 30.0
+        self.video_fps = 50.0
         self.use_ffmpeg = False
         self.ffmpeg_process = None
         self.ffmpeg_width = getattr(config, "VIDEO_WIDTH", 1920)
@@ -649,12 +650,25 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         outline_thickness = max(2, font_thickness)  # Обводка толще основного текста
         
         # Рисуем обводку текста
-        cv2.putText(overlay, f"{angle_val:.0f}°", (pb[0] + 10, pb[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 0), outline_thickness, cv2.LINE_AA)
-        
+        # cv2.putText(overlay, f"{angle_val:.0f}", (pb[0] + 10, pb[1] - 10),
+                   # cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 0), outline_thickness, cv2.LINE_AA)
+
+
+
+        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGRA2RGB))
+        draw = ImageDraw.Draw(image_pil)
+        font = ImageFont.truetype("arial.ttf",font_size*50) if hasattr(ImageFont, 'truetype') else ImageFont.load_default()
+        if outline_thickness > 1:
+            for dx in [-outline_thickness, 0, outline_thickness]:
+                for dy in [-outline_thickness, 0, outline_thickness]:
+                    if dx != 0 or dy != 0:
+                        draw.text((pb[0] + 10, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))
+        draw.text((pb[0] + 10, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))   
+        overlay  = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+        # °
         # Рисуем основной текст
-        cv2.putText(overlay, f"{angle_val:.0f}°", (pb[0] + 10, pb[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, font_size, bone_bgr, font_thickness, cv2.LINE_AA)
+        # cv2.putText(overlay, f"{angle_val:.0f}", (pb[0] + 10, pb[1] - 10),
+          #          cv2.FONT_HERSHEY_SIMPLEX, font_size, bone_bgr, font_thickness, cv2.LINE_AA)
         
         for idx in [a, b, c]:
             x, y = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
@@ -851,7 +865,7 @@ class UnifiedTrackingApp:
                 self.virtual_cam = pyvirtualcam.Camera(
                     width=self.WINDOW_W, 
                     height=self.WINDOW_H,
-                    fps=30,
+                    fps=50,
                     fmt=PixelFormat.BGR
                 )
             except Exception as e:
@@ -1026,7 +1040,7 @@ class UnifiedTrackingApp:
             # NDI
             if self.ndi_sender:
                 now = time.time()
-                if now - last_send >= 1.0 / 30:  # 30 FPS для NDI
+                if now - last_send >= 1.0 / 120:  # 30 FPS для NDI
                     try:
                         bgrx = np.zeros((self.WINDOW_H, self.WINDOW_W, 4), dtype=np.uint8)
                         bgrx[:, :, :3] = display_frame

@@ -52,7 +52,7 @@ class AppGUI:
         # Выходные потоки
         self.use_ndi = tk.BooleanVar(value=False)
         self.use_virtual = tk.BooleanVar(value=False)
-        self.ndi_name = tk.StringVar(value="UnifiedStream_NDI")
+        self.ndi_name = tk.StringVar(value="Stream_NDI")
         
         # Статус
         self.status_var = tk.StringVar(value="Готов к работе")
@@ -60,8 +60,8 @@ class AppGUI:
         # Параметры обработки
         self.proc_w = 320
         self.proc_h = 180
-        self.every_n = 2
-        self.target_fps = 30
+        self.every_n = 1
+        self.target_fps = 120
         
     def _setup_styles(self):
         """Настройка стилей интерфейса"""
@@ -218,13 +218,13 @@ class AppGUI:
             command=self.on_mode_change
         ).pack(anchor='w', pady=2)
         
-        ttk.Radiobutton(
-            mode_frame, 
-            text="Поза + штанга", 
-            variable=self.mode, 
-            value="both",
-            command=self.on_mode_change
-        ).pack(anchor='w', pady=2)
+        # ttk.Radiobutton(
+        #     mode_frame, 
+        #     text="Поза + штанга", 
+        #     variable=self.mode, 
+        #     value="both",
+        #     command=self.on_mode_change
+        # ).pack(anchor='w', pady=2)
         
     def _create_source_section(self, parent):
         """Секция выбора источника видео"""
