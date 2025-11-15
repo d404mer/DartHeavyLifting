@@ -1027,20 +1027,23 @@ class UnifiedTrackingApp:
                 # Рисуем путь штанги на масштабированном кадре с правильными координатами
                 if self.gui.enable_barbell.get() and self.barbell_tracker:
                     path = self.barbell_tracker.get_path()
-                    path_offset_x = 480  # Смещение пути вправо
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
                     if len(path) >= 2:
-                        path_color = (0, 0, 255)  # Красный
-                        # Создаем overlay для полупрозрачного пути
-                        path_overlay = display_frame.copy()
-                        path_alpha = 0.7  # Прозрачность (70% непрозрачности)
-                        
-                        for i in range(1, len(path)):
-                            pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
-                            pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
-                            cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
-                        
-                        # Накладываем полупрозрачный путь на кадр
-                        cv2.addWeighted(path_overlay, path_alpha, display_frame, 1 - path_alpha, 0, display_frame)
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
                     
                     # Рисуем пунктирную линию от первой точки пути
                     if len(path) > 0:
@@ -1049,15 +1052,16 @@ class UnifiedTrackingApp:
                         first_point_y = int(path[0][1] * scale + offset_y)  # Y координата первой точки (масштабированная)
                         if 0 <= first_point_x < w and 0 <= first_point_y < h:
                             line_x = first_point_x  # Позиция линии по X координате первой точки
-                            dash_length = 12
-                            gap_length = 15  # Увеличенный промежуток между сегментами
+                            # Масштабируем длину и промежуток пунктира для масштабированного кадра
+                            dash_length = int(config.BARBELL_DASH_LENGTH * scale)
+                            gap_length = int(config.BARBELL_DASH_GAP * scale)
                             current_y = first_point_y
-                            line_thickness = max(2, config.LINE_THICKNESS)
+                            line_thickness = max(1, int(config.BARBELL_DASH_THICKNESS * scale))
                             
                             # Создаем overlay для полупрозрачного пунктира
                             overlay = display_frame.copy()
-                            dash_color = (255, 255, 255)  # Белый цвет
-                            alpha = 0.6  # Прозрачность (60% непрозрачности)
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
                             
                             while current_y > 0:
                                 end_y = max(0, current_y - dash_length)
@@ -1081,20 +1085,23 @@ class UnifiedTrackingApp:
                     )
                 elif self.gui.enable_barbell.get() and self.barbell_tracker:
                     path = self.barbell_tracker.get_path()
-                    path_offset_x = 100  # Смещение пути вправо
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
                     if len(path) >= 2:
-                        path_color = (0, 0, 255)  # Красный
-                        # Создаем overlay для полупрозрачного пути
-                        path_overlay = display_frame.copy()
-                        path_alpha = 0.7  # Прозрачность (70% непрозрачности)
-                        
-                        for i in range(1, len(path)):
-                            pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
-                            pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
-                            cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
-                        
-                        # Накладываем полупрозрачный путь на кадр
-                        cv2.addWeighted(path_overlay, path_alpha, display_frame, 1 - path_alpha, 0, display_frame)
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
                     
                     # Рисуем пунктирную линию от первой точки пути
                     if len(path) > 0:
@@ -1103,15 +1110,15 @@ class UnifiedTrackingApp:
                         first_point_y = int(path[0][1])  # Y координата первой точки
                         if 0 <= first_point_x < w and 0 <= first_point_y < h:
                             line_x = first_point_x  # Позиция линии по X координате первой точки
-                            dash_length = 12
-                            gap_length = 15  # Увеличенный промежуток между сегментами
+                            dash_length = config.BARBELL_DASH_LENGTH
+                            gap_length = config.BARBELL_DASH_GAP
                             current_y = first_point_y
-                            line_thickness = max(2, config.LINE_THICKNESS)
+                            line_thickness = config.BARBELL_DASH_THICKNESS
                             
                             # Создаем overlay для полупрозрачного пунктира
                             overlay = display_frame.copy()
-                            dash_color = (255, 255, 255)  # Белый цвет
-                            alpha = 0.6  # Прозрачность (60% непрозрачности)
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
                             
                             while current_y > 0:
                                 end_y = max(0, current_y - dash_length)

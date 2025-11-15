@@ -95,35 +95,46 @@ class Visualizer:
             else:
                 xs_draw, ys_draw = xs, ys
             
-            # Смещаем путь вправо на 100 пикселей
-            path_offset_x = 480
+            # Смещаем путь вправо
+            path_offset_x = config.BARBELL_PATH_OFFSET_X
             xs_draw = xs_draw + path_offset_x
             
-            # Цвет пути - красный (BGR: 0, 0, 255)
-            path_color = (0, 0, 255)
+            # Цвет пути из конфига
+            path_color = config.BARBELL_PATH_COLOR
+            path_opacity = config.BARBELL_PATH_OPACITY
             
-            # Создаем overlay для полупрозрачного пути
-            overlay = frame.copy()
-            alpha = 0.3  # Прозрачность (70% непрозрачности)
-            
-            # Рисуем линии между соседними точками пути (сглаженные) на overlay
-            for i in range(1, len(xs_draw)):
-                pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
-                pt2 = (int(xs_draw[i]), int(ys_draw[i]))
-                cv2.line(overlay, pt1, pt2, path_color, self.line_thickness)
-            
-            # Рисуем точки пути (реже, чтобы не перегружать визуализацию) на overlay
-            step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
-            for i in range(0, len(xs_draw), step):
-                cv2.circle(overlay, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
-            
-            # Накладываем полупрозрачный overlay на кадр
-            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+            # Рисуем путь с учетом прозрачности
+            if path_opacity < 1.0:
+                # Если прозрачность меньше 100%, используем overlay
+                path_overlay = frame.copy()
+                for i in range(1, len(xs_draw)):
+                    pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+                    pt2 = (int(xs_draw[i]), int(ys_draw[i]))
+                    cv2.line(path_overlay, pt1, pt2, path_color, self.line_thickness)
+                
+                # Рисуем точки пути на overlay
+                step = max(1, len(xs_draw) // 50)
+                for i in range(0, len(xs_draw), step):
+                    cv2.circle(path_overlay, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
+                
+                # Накладываем полупрозрачный путь на кадр
+                cv2.addWeighted(path_overlay, path_opacity, frame, 1 - path_opacity, 0, frame)
+            else:
+                # Если 100% непрозрачность, рисуем напрямую
+                for i in range(1, len(xs_draw)):
+                    pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+                    pt2 = (int(xs_draw[i]), int(ys_draw[i]))
+                    cv2.line(frame, pt1, pt2, path_color, self.line_thickness)
+                
+                # Рисуем точки пути
+                step = max(1, len(xs_draw) // 50)
+                for i in range(0, len(xs_draw), step):
+                    cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
         
         # Рисуем вертикальную пунктирную линию от первой точки пути
         if len(path) > 0:
             h, w = frame.shape[:2]
-            path_offset_x = 480  # Смещение пути вправо
+            path_offset_x = config.BARBELL_PATH_OFFSET_X
             first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
             first_point_y = int(path[0][1])  # Y координата первой точки
             
@@ -132,17 +143,17 @@ class Visualizer:
                 line_x = first_point_x  # Позиция линии по X координате первой точки
                 
                 # Рисуем пунктирную линию вверх от первой точки до верха экрана
-                dash_length = 12
-                gap_length = 15  # Увеличенный промежуток между сегментами
+                dash_length = config.BARBELL_DASH_LENGTH
+                gap_length = config.BARBELL_DASH_GAP
                 current_y = first_point_y
                 
-                # Используем более толстую линию для видимости
-                line_thickness = max(2, self.line_thickness)
+                # Толщина пунктира из конфига
+                line_thickness = config.BARBELL_DASH_THICKNESS
                 
                 # Создаем overlay для полупрозрачного пунктира
                 overlay = frame.copy()
-                dash_color = (255, 255, 255)  # Белый цвет
-                alpha = 0.6  # Прозрачность (60% непрозрачности)
+                dash_color = config.BARBELL_DASH_COLOR
+                alpha = config.BARBELL_DASH_OPACITY
                 
                 while current_y > 0:
                     # Рисуем сегмент пунктира на overlay

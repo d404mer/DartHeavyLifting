@@ -43,6 +43,17 @@ class AppGUI:
         self.font_size = tk.DoubleVar(value=0.7)  # Размер шрифта для градусов
         self.font_thickness = tk.IntVar(value=1)  # Толщина шрифта
         
+        # Параметры визуализации пути штанги
+        import config
+        self.barbell_path_offset_x = tk.IntVar(value=config.BARBELL_PATH_OFFSET_X)
+        self.barbell_path_opacity = tk.DoubleVar(value=config.BARBELL_PATH_OPACITY)
+        self.barbell_path_color = tk.StringVar(value="#FF0000")  # Красный в HEX
+        self.barbell_dash_length = tk.IntVar(value=config.BARBELL_DASH_LENGTH)
+        self.barbell_dash_gap = tk.IntVar(value=config.BARBELL_DASH_GAP)
+        self.barbell_dash_thickness = tk.IntVar(value=config.BARBELL_DASH_THICKNESS)
+        self.barbell_dash_opacity = tk.DoubleVar(value=config.BARBELL_DASH_OPACITY)
+        self.barbell_dash_color = tk.StringVar(value="#FFFFFF")  # Белый в HEX
+        
         # Модель
         self.model_complexity = tk.IntVar(value=1)
         self.smooth_landmarks = tk.BooleanVar(value=True)
@@ -184,6 +195,9 @@ class AppGUI:
         
         # Настройки шрифта
         self._create_font_section(parent)
+        
+        # Настройки визуализации пути штанги
+        self._create_barbell_path_section(parent)
         
         # Настройки модели
         self._create_model_section(parent)
@@ -455,7 +469,200 @@ class AppGUI:
             width=3
         )
         self.font_thickness_label.pack(side='left', padx=5)
+    
+    def _create_barbell_path_section(self, parent):
+        """Секция настроек визуализации пути штанги"""
+        barbell_frame = ttk.LabelFrame(parent, text="🎯 Визуализация пути штанги", padding=10)
+        barbell_frame.pack(fill='x', pady=(0, 10))
         
+        import config
+        
+        # Смещение пути вправо
+        offset_frame = ttk.Frame(barbell_frame)
+        offset_frame.pack(fill='x', pady=5)
+        ttk.Label(offset_frame, text="Смещение пути (X):").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        offset_scale_frame = ttk.Frame(offset_frame)
+        offset_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            offset_scale_frame,
+            from_=0,
+            to=1000,
+            orient='horizontal',
+            variable=self.barbell_path_offset_x,
+            command=self.on_barbell_path_offset_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_path_offset_label = ttk.Label(
+            offset_scale_frame,
+            text=str(self.barbell_path_offset_x.get()),
+            width=4
+        )
+        self.barbell_path_offset_label.pack(side='left', padx=5)
+        
+        # Длина сегмента пунктира
+        dash_length_frame = ttk.Frame(barbell_frame)
+        dash_length_frame.pack(fill='x', pady=5)
+        ttk.Label(dash_length_frame, text="Длина сегмента пунктира:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        dash_length_scale_frame = ttk.Frame(dash_length_frame)
+        dash_length_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            dash_length_scale_frame,
+            from_=1,
+            to=50,
+            orient='horizontal',
+            variable=self.barbell_dash_length,
+            command=self.on_barbell_dash_length_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_dash_length_label = ttk.Label(
+            dash_length_scale_frame,
+            text=str(self.barbell_dash_length.get()),
+            width=3
+        )
+        self.barbell_dash_length_label.pack(side='left', padx=5)
+        
+        # Промежуток между сегментами пунктира
+        dash_gap_frame = ttk.Frame(barbell_frame)
+        dash_gap_frame.pack(fill='x', pady=5)
+        ttk.Label(dash_gap_frame, text="Промежуток пунктира:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        dash_gap_scale_frame = ttk.Frame(dash_gap_frame)
+        dash_gap_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            dash_gap_scale_frame,
+            from_=1,
+            to=50,
+            orient='horizontal',
+            variable=self.barbell_dash_gap,
+            command=self.on_barbell_dash_gap_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_dash_gap_label = ttk.Label(
+            dash_gap_scale_frame,
+            text=str(self.barbell_dash_gap.get()),
+            width=3
+        )
+        self.barbell_dash_gap_label.pack(side='left', padx=5)
+        
+        # Толщина пунктира
+        dash_thickness_frame = ttk.Frame(barbell_frame)
+        dash_thickness_frame.pack(fill='x', pady=5)
+        ttk.Label(dash_thickness_frame, text="Толщина пунктира:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        dash_thickness_scale_frame = ttk.Frame(dash_thickness_frame)
+        dash_thickness_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            dash_thickness_scale_frame,
+            from_=1,
+            to=10,
+            orient='horizontal',
+            variable=self.barbell_dash_thickness,
+            command=self.on_barbell_dash_thickness_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_dash_thickness_label = ttk.Label(
+            dash_thickness_scale_frame,
+            text=str(self.barbell_dash_thickness.get()),
+            width=3
+        )
+        self.barbell_dash_thickness_label.pack(side='left', padx=5)
+        
+        # Прозрачность пунктира
+        dash_opacity_frame = ttk.Frame(barbell_frame)
+        dash_opacity_frame.pack(fill='x', pady=5)
+        ttk.Label(dash_opacity_frame, text="Прозрачность пунктира:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        dash_opacity_scale_frame = ttk.Frame(dash_opacity_frame)
+        dash_opacity_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            dash_opacity_scale_frame,
+            from_=0.0,
+            to=1.0,
+            orient='horizontal',
+            variable=self.barbell_dash_opacity,
+            command=self.on_barbell_dash_opacity_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_dash_opacity_label = ttk.Label(
+            dash_opacity_scale_frame,
+            text=f"{self.barbell_dash_opacity.get():.2f}",
+            width=4
+        )
+        self.barbell_dash_opacity_label.pack(side='left', padx=5)
+        
+        # Цвет пути
+        path_color_frame = ttk.Frame(barbell_frame)
+        path_color_frame.pack(fill='x', pady=5)
+        ttk.Label(path_color_frame, text="Цвет пути:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        self.barbell_path_color_btn = ttk.Button(
+            path_color_frame,
+            text="Выбрать",
+            command=self.choose_barbell_path_color,
+            width=8
+        )
+        self.barbell_path_color_btn.grid(row=0, column=1, padx=5, pady=3)
+        self.barbell_path_color_preview = tk.Canvas(
+            path_color_frame,
+            width=40,
+            height=20,
+            bg=self.barbell_path_color.get(),
+            relief='solid',
+            bd=1
+        )
+        self.barbell_path_color_preview.grid(row=0, column=2, padx=5, pady=3)
+        
+        # Цвет пунктира
+        dash_color_frame = ttk.Frame(barbell_frame)
+        dash_color_frame.pack(fill='x', pady=5)
+        ttk.Label(dash_color_frame, text="Цвет пунктира:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        self.barbell_dash_color_btn = ttk.Button(
+            dash_color_frame,
+            text="Выбрать",
+            command=self.choose_barbell_dash_color,
+            width=8
+        )
+        self.barbell_dash_color_btn.grid(row=0, column=1, padx=5, pady=3)
+        self.barbell_dash_color_preview = tk.Canvas(
+            dash_color_frame,
+            width=40,
+            height=20,
+            bg=self.barbell_dash_color.get(),
+            relief='solid',
+            bd=1
+        )
+        self.barbell_dash_color_preview.grid(row=0, column=2, padx=5, pady=3)
+        
+        # Прозрачность пути
+        path_opacity_frame = ttk.Frame(barbell_frame)
+        path_opacity_frame.pack(fill='x', pady=5)
+        ttk.Label(path_opacity_frame, text="Прозрачность пути:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        path_opacity_scale_frame = ttk.Frame(path_opacity_frame)
+        path_opacity_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            path_opacity_scale_frame,
+            from_=0.0,
+            to=1.0,
+            orient='horizontal',
+            variable=self.barbell_path_opacity,
+            command=self.on_barbell_path_opacity_change,
+            length=120
+        ).pack(side='left')
+        
+        self.barbell_path_opacity_label = ttk.Label(
+            path_opacity_scale_frame,
+            text=f"{self.barbell_path_opacity.get():.2f}",
+            width=4
+        )
+        self.barbell_path_opacity_label.pack(side='left', padx=5)
+    
     def _create_model_section(self, parent):
         """Секция настроек модели"""
         model_frame = ttk.LabelFrame(parent, text="🧠 Настройки модели", padding=10)
@@ -692,6 +899,70 @@ class AppGUI:
     def on_font_thickness_change(self, value):
         """Обработчик изменения толщины шрифта"""
         self.font_thickness_label.config(text=str(int(float(value))))
+    
+    def on_barbell_path_offset_change(self, value):
+        """Обработчик изменения смещения пути"""
+        val = int(float(value))
+        self.barbell_path_offset_label.config(text=str(val))
+        import config
+        config.BARBELL_PATH_OFFSET_X = val
+    
+    def on_barbell_dash_length_change(self, value):
+        """Обработчик изменения длины сегмента пунктира"""
+        val = int(float(value))
+        self.barbell_dash_length_label.config(text=str(val))
+        import config
+        config.BARBELL_DASH_LENGTH = val
+    
+    def on_barbell_dash_gap_change(self, value):
+        """Обработчик изменения промежутка пунктира"""
+        val = int(float(value))
+        self.barbell_dash_gap_label.config(text=str(val))
+        import config
+        config.BARBELL_DASH_GAP = val
+    
+    def on_barbell_dash_thickness_change(self, value):
+        """Обработчик изменения толщины пунктира"""
+        val = int(float(value))
+        self.barbell_dash_thickness_label.config(text=str(val))
+        import config
+        config.BARBELL_DASH_THICKNESS = val
+    
+    def on_barbell_dash_opacity_change(self, value):
+        """Обработчик изменения прозрачности пунктира"""
+        val = float(value)
+        self.barbell_dash_opacity_label.config(text=f"{val:.2f}")
+        import config
+        config.BARBELL_DASH_OPACITY = val
+    
+    def on_barbell_path_opacity_change(self, value):
+        """Обработчик изменения прозрачности пути"""
+        val = float(value)
+        self.barbell_path_opacity_label.config(text=f"{val:.2f}")
+        import config
+        config.BARBELL_PATH_OPACITY = val
+    
+    def choose_barbell_path_color(self):
+        """Выбор цвета пути"""
+        color = askcolor(initialcolor=self.barbell_path_color.get(), title="Выберите цвет пути")[1]
+        if color:
+            self.barbell_path_color.set(color)
+            self.barbell_path_color_preview.config(bg=color)
+            # Конвертируем HEX в BGR для config
+            import config
+            rgb = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            config.BARBELL_PATH_COLOR = (rgb[2], rgb[1], rgb[0])  # RGB -> BGR
+    
+    def choose_barbell_dash_color(self):
+        """Выбор цвета пунктира"""
+        color = askcolor(initialcolor=self.barbell_dash_color.get(), title="Выберите цвет пунктира")[1]
+        if color:
+            self.barbell_dash_color.set(color)
+            self.barbell_dash_color_preview.config(bg=color)
+            # Конвертируем HEX в BGR для config
+            import config
+            rgb = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            config.BARBELL_DASH_COLOR = (rgb[2], rgb[1], rgb[0])  # RGB -> BGR
         
     def browse_file(self):
         """Выбор видео файла"""
