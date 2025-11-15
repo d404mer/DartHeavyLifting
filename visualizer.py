@@ -95,24 +95,36 @@ class Visualizer:
             else:
                 xs_draw, ys_draw = xs, ys
             
+            # Смещаем путь вправо на 100 пикселей
+            path_offset_x = 480
+            xs_draw = xs_draw + path_offset_x
+            
             # Цвет пути - красный (BGR: 0, 0, 255)
             path_color = (0, 0, 255)
             
-            # Рисуем линии между соседними точками пути (сглаженные)
+            # Создаем overlay для полупрозрачного пути
+            overlay = frame.copy()
+            alpha = 0.3  # Прозрачность (70% непрозрачности)
+            
+            # Рисуем линии между соседними точками пути (сглаженные) на overlay
             for i in range(1, len(xs_draw)):
                 pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
                 pt2 = (int(xs_draw[i]), int(ys_draw[i]))
-                cv2.line(frame, pt1, pt2, path_color, self.line_thickness)
+                cv2.line(overlay, pt1, pt2, path_color, self.line_thickness)
             
-            # Рисуем точки пути (реже, чтобы не перегружать визуализацию)
+            # Рисуем точки пути (реже, чтобы не перегружать визуализацию) на overlay
             step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
             for i in range(0, len(xs_draw), step):
-                cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
+                cv2.circle(overlay, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
+            
+            # Накладываем полупрозрачный overlay на кадр
+            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
         
         # Рисуем вертикальную пунктирную линию от первой точки пути
         if len(path) > 0:
             h, w = frame.shape[:2]
-            first_point_x = int(path[0][0])  # X координата первой точки
+            path_offset_x = 480  # Смещение пути вправо
+            first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
             first_point_y = int(path[0][1])  # Y координата первой точки
             
             # Проверяем, что координаты валидны
@@ -120,26 +132,31 @@ class Visualizer:
                 line_x = first_point_x  # Позиция линии по X координате первой точки
                 
                 # Рисуем пунктирную линию вверх от первой точки до верха экрана
-                dash_length = 15
-                gap_length = 8
+                dash_length = 12
+                gap_length = 15  # Увеличенный промежуток между сегментами
                 current_y = first_point_y
                 
                 # Используем более толстую линию для видимости
                 line_thickness = max(2, self.line_thickness)
                 
-                # Цвет пунктира - белый (BGR: 255, 255, 255)
-                dash_color = (255, 255, 255)
+                # Создаем overlay для полупрозрачного пунктира
+                overlay = frame.copy()
+                dash_color = (255, 255, 255)  # Белый цвет
+                alpha = 0.6  # Прозрачность (60% непрозрачности)
                 
                 while current_y > 0:
-                    # Рисуем сегмент пунктира
+                    # Рисуем сегмент пунктира на overlay
                     end_y = max(0, current_y - dash_length)
                     if end_y < current_y:  # Убеждаемся, что есть что рисовать
-                        cv2.line(frame, (line_x, current_y), (line_x, end_y), 
+                        cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
                                 dash_color, line_thickness)
                     # Переходим к следующему сегменту
                     current_y = end_y - gap_length
                     if current_y <= 0:
                         break
+                
+                # Накладываем полупрозрачный overlay на кадр
+                cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
     
     def _smooth_path_savgol(self, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
