@@ -1047,53 +1047,10 @@ class UnifiedTrackingApp:
                     left_knee_angle = joints.get('left_knee_angle')
                     right_knee_angle = joints.get('right_knee_angle')
             
-            # Визуализация пути штанги
-            if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
-                display_frame = self.visualizer.draw_frame(
-                    display_frame, 
-                    pose_data if self.gui.enable_pose.get() else None,
-                    barbell_pos, 
-                    self.barbell_tracker.get_path()
-                )
-            elif self.gui.enable_barbell.get() and self.barbell_tracker:
-                # Если visualizer не создан, рисуем путь вручную
-                path = self.barbell_tracker.get_path()
-                if len(path) >= 2:
-                    for i in range(1, len(path)):
-                        pt1 = (int(path[i-1][0]), int(path[i-1][1]))
-                        pt2 = (int(path[i][0]), int(path[i][1]))
-                        cv2.line(display_frame, pt1, pt2, config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+            # Визуализация пути штанги будет выполнена после изменения размера кадра
+            # (чтобы координаты пути соответствовали масштабированному кадру)
             
-            # Добавляем надпись в углу экрана, если включен режим трекинга штанги
-            if self.gui.enable_barbell.get():
-                try:
-                    # Используем PIL для корректного отображения русского текста
-                    image_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
-                    draw = ImageDraw.Draw(image_pil)
-                    try:
-                        font = ImageFont.truetype("arial.ttf", 36)
-                    except:
-                        font = ImageFont.load_default()
-                    
-                    text = "ТРАЕКТОРИЯ ШТАНГИ"
-                    # Позиция в левом верхнем углу с небольшим отступом
-                    text_x = 1350
-                    text_y = 940
-                    
-                    # Рисуем обводку текста для лучшей читаемости
-                    outline_thickness = 2
-                    for dx in [-outline_thickness, 0, outline_thickness]:
-                        for dy in [-outline_thickness, 0, outline_thickness]:
-                            if dx != 0 or dy != 0:
-                                draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
-                    
-                    # Рисуем основной текст
-                    draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
-                    display_frame = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-                except Exception as e:
-                    # Если не удалось использовать PIL, используем cv2 (может не отобразить кириллицу)
-                    cv2.putText(display_frame, "Path tracking active", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Изображение будет добавлено после изменения размера кадра
             
             # Отправка UDP данных
             udp_data = {
@@ -1122,11 +1079,157 @@ class UnifiedTrackingApp:
                 pass
             
             # Изменение размера
-            if display_frame.shape[1] != self.WINDOW_W or display_frame.shape[0] != self.WINDOW_H:
+            original_h, original_w = display_frame.shape[:2]
+            if original_w != self.WINDOW_W or original_h != self.WINDOW_H:
+                # Вычисляем масштаб и смещение для масштабирования координат пути
+                scale = min(self.WINDOW_W / original_w, self.WINDOW_H / original_h)
+                new_w = int(original_w * scale)
+                new_h = int(original_h * scale)
+                offset_x = (self.WINDOW_W - new_w) // 2
+                offset_y = (self.WINDOW_H - new_h) // 2
+                
+                # Масштабируем кадр
                 display_frame = resize_with_aspect(display_frame, self.WINDOW_W, self.WINDOW_H)
+                
+                # Рисуем путь штанги на масштабированном кадре с правильными координатами
+                if self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
+                    if len(path) >= 2:
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int((path[0][0] + path_offset_x) * scale + offset_x)  # X координата первой точки (масштабированная со смещением)
+                        first_point_y = int(path[0][1] * scale + offset_y)  # Y координата первой точки (масштабированная)
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            # Масштабируем длину и промежуток пунктира для масштабированного кадра
+                            dash_length = int(config.BARBELL_DASH_LENGTH * scale)
+                            gap_length = int(config.BARBELL_DASH_GAP * scale)
+                            current_y = first_point_y
+                            line_thickness = max(1, int(config.BARBELL_DASH_THICKNESS * scale))
+                            
+                            # Создаем overlay для полупрозрачного пунктира
+                            overlay = display_frame.copy()
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
+                            
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
+                            
+                            # Накладываем полупрозрачный overlay на кадр
+                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
+            else:
+                # Если размер не изменяется, рисуем путь напрямую
+                if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
+                    display_frame = self.visualizer.draw_frame(
+                        display_frame, 
+                        pose_data if self.gui.enable_pose.get() else None,
+                        barbell_pos, 
+                        self.barbell_tracker.get_path()
+                    )
+                elif self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
+                    if len(path) >= 2:
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
+                        first_point_y = int(path[0][1])  # Y координата первой точки
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            dash_length = config.BARBELL_DASH_LENGTH
+                            gap_length = config.BARBELL_DASH_GAP
+                            current_y = first_point_y
+                            line_thickness = config.BARBELL_DASH_THICKNESS
+                            
+                            # Создаем overlay для полупрозрачного пунктира
+                            overlay = display_frame.copy()
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
+                            
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
+                            
+                            # Накладываем полупрозрачный overlay на кадр
+                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
             
             # Обновление предпросмотра
             self.root.after(0, self.gui.update_preview, display_frame.copy())
+            
+            # Накладываем PNG изображение поверх видео через PIL
+            if self.gui.enable_barbell.get():
+                try:
+                    logo_path = "траектория_штанги.png"  # Путь к PNG файлу
+                    logo_img = Image.open(logo_path)
+                    
+                    # Получаем размеры кадра
+                    frame_height, frame_width = display_frame.shape[:2]
+                    
+                    # Масштабируем изображение до размеров кадра
+                    logo_img = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    
+                    # Конвертируем кадр в PIL Image
+                    frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    
+                    # Если изображение с прозрачностью (RGBA), используем alpha composite
+                    if logo_img.mode == 'RGBA':
+                        frame_pil = frame_pil.convert('RGBA')
+                        frame_pil.paste(logo_img, (0, 0), logo_img)
+                        frame_pil = frame_pil.convert('RGB')
+                    else:
+                        frame_pil.paste(logo_img, (0, 0))
+                    
+                    # Конвертируем обратно в BGR для OpenCV
+                    display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    # Если не удалось загрузить изображение, используем обычный кадр
+                    pass
             
             # Отображение
             cv2.imshow("Unified Tracking (ESC to stop)", display_frame)
