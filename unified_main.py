@@ -632,9 +632,9 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     
     for limb, (a, b, c) in limbs.items():
         try:
-            pa = (int(landmarks[a].x * w), int(landmarks[a].y * h))
-            pb = (int(landmarks[b].x * w), int(landmarks[b].y * h))
-            pc = (int(landmarks[c].x * w), int(landmarks[c].y * h))
+            pa = (int(landmarks[a].x * w+480), int(landmarks[a].y * h))
+            pb = (int(landmarks[b].x * w+480), int(landmarks[b].y * h))
+            pc = (int(landmarks[c].x * w+480), int(landmarks[c].y * h))
         except:
             continue
         
@@ -662,8 +662,8 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
             for dx in [-outline_thickness, 0, outline_thickness]:
                 for dy in [-outline_thickness, 0, outline_thickness]:
                     if dx != 0 or dy != 0:
-                        draw.text((pb[0] + 10, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))
-        draw.text((pb[0] + 10, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))   
+                        draw.text((pb[0] + 10 + 100, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))
+        draw.text((pb[0] +10 + 100, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))   
         overlay  = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
         # °
         # Рисуем основной текст
@@ -672,8 +672,8 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         
         for idx in [a, b, c]:
             x, y = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
-            cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
-            cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
+            cv2.circle(overlay, (x+480, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(overlay, (x+480, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
     
     return cv2.addWeighted(overlay, 0.9, frame, 0.1, 0)
 # -------------------- Основной класс приложения --------------------
