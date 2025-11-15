@@ -980,56 +980,8 @@ class UnifiedTrackingApp:
                     left_knee_angle = joints.get('left_knee_angle')
                     right_knee_angle = joints.get('right_knee_angle')
             
-            # Визуализация пути штанги
-            if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
-                display_frame = self.visualizer.draw_frame(
-                    display_frame, 
-                    pose_data if self.gui.enable_pose.get() else None,
-                    barbell_pos, 
-                    self.barbell_tracker.get_path()
-                )
-            elif self.gui.enable_barbell.get() and self.barbell_tracker:
-                # Если visualizer не создан, рисуем путь вручную
-                path = self.barbell_tracker.get_path()
-                if len(path) >= 2:
-                    # Цвет пути - красный (BGR: 0, 0, 255)
-                    path_color = (0, 0, 255)
-                    
-                    for i in range(1, len(path)):
-                        pt1 = (int(path[i-1][0]), int(path[i-1][1]))
-                        pt2 = (int(path[i][0]), int(path[i][1]))
-                        cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
-                
-                # Рисуем вертикальную пунктирную линию в правой части экрана от первой точки
-                if len(path) > 0:
-                    h, w = display_frame.shape[:2]
-                    first_point_y = int(path[0][1])  # Y координата первой точки
-                    
-                    # Проверяем, что координата валидна
-                    if 0 <= first_point_y < h:
-                        line_x = w - 100  # Позиция линии в правой части экрана (100 пикселей от края для лучшей видимости)
-                        
-                        # Рисуем пунктирную линию вверх от первой точки до верха экрана
-                        dash_length = 15
-                        gap_length = 8
-                        current_y = first_point_y
-                        
-                        # Используем более толстую линию для видимости
-                        line_thickness = max(2, config.LINE_THICKNESS)
-                        
-                        # Цвет пунктира - белый (BGR: 255, 255, 255)
-                        dash_color = (255, 255, 255)
-                        
-                        while current_y > 0:
-                            # Рисуем сегмент пунктира
-                            end_y = max(0, current_y - dash_length)
-                            if end_y < current_y:  # Убеждаемся, что есть что рисовать
-                                cv2.line(display_frame, (line_x, current_y), (line_x, end_y), 
-                                        dash_color, line_thickness)
-                            # Переходим к следующему сегменту
-                            current_y = end_y - gap_length
-                            if current_y <= 0:
-                                break
+            # Визуализация пути штанги будет выполнена после изменения размера кадра
+            # (чтобы координаты пути соответствовали масштабированному кадру)
             
             # Добавляем надпись в углу экрана, если включен режим трекинга штанги
             if self.gui.enable_barbell.get():
@@ -1116,8 +1068,86 @@ class UnifiedTrackingApp:
                 pass
             
             # Изменение размера
-            if display_frame.shape[1] != self.WINDOW_W or display_frame.shape[0] != self.WINDOW_H:
+            original_h, original_w = display_frame.shape[:2]
+            if original_w != self.WINDOW_W or original_h != self.WINDOW_H:
+                # Вычисляем масштаб и смещение для масштабирования координат пути
+                scale = min(self.WINDOW_W / original_w, self.WINDOW_H / original_h)
+                new_w = int(original_w * scale)
+                new_h = int(original_h * scale)
+                offset_x = (self.WINDOW_W - new_w) // 2
+                offset_y = (self.WINDOW_H - new_h) // 2
+                
+                # Масштабируем кадр
                 display_frame = resize_with_aspect(display_frame, self.WINDOW_W, self.WINDOW_H)
+                
+                # Рисуем путь штанги на масштабированном кадре с правильными координатами
+                if self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    if len(path) >= 2:
+                        path_color = (0, 0, 255)  # Красный
+                        for i in range(1, len(path)):
+                            pt1 = (int(path[i-1][0] * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                            pt2 = (int(path[i][0] * scale + offset_x), int(path[i][1] * scale + offset_y))
+                            cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int(path[0][0] * scale + offset_x)  # X координата первой точки (масштабированная)
+                        first_point_y = int(path[0][1] * scale + offset_y)  # Y координата первой точки (масштабированная)
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            dash_length = 15
+                            gap_length = 8
+                            current_y = first_point_y
+                            line_thickness = max(2, config.LINE_THICKNESS)
+                            dash_color = (255, 255, 255)  # Белый
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(display_frame, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
+            else:
+                # Если размер не изменяется, рисуем путь напрямую
+                if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
+                    display_frame = self.visualizer.draw_frame(
+                        display_frame, 
+                        pose_data if self.gui.enable_pose.get() else None,
+                        barbell_pos, 
+                        self.barbell_tracker.get_path()
+                    )
+                elif self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    if len(path) >= 2:
+                        path_color = (0, 0, 255)  # Красный
+                        for i in range(1, len(path)):
+                            pt1 = (int(path[i-1][0]), int(path[i-1][1]))
+                            pt2 = (int(path[i][0]), int(path[i][1]))
+                            cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int(path[0][0])  # X координата первой точки
+                        first_point_y = int(path[0][1])  # Y координата первой точки
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            dash_length = 15
+                            gap_length = 8
+                            current_y = first_point_y
+                            line_thickness = max(2, config.LINE_THICKNESS)
+                            dash_color = (255, 255, 255)  # Белый
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(display_frame, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
             
             # Обновление предпросмотра
             self.root.after(0, self.gui.update_preview, display_frame.copy())
