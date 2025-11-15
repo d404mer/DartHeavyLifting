@@ -992,26 +992,84 @@ class UnifiedTrackingApp:
                 # Если visualizer не создан, рисуем путь вручную
                 path = self.barbell_tracker.get_path()
                 if len(path) >= 2:
+                    # Цвет пути - красный (BGR: 0, 0, 255)
+                    path_color = (0, 0, 255)
+                    
                     for i in range(1, len(path)):
                         pt1 = (int(path[i-1][0]), int(path[i-1][1]))
                         pt2 = (int(path[i][0]), int(path[i][1]))
-                        cv2.line(display_frame, pt1, pt2, config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+                        cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                
+                # Рисуем вертикальную пунктирную линию в правой части экрана от первой точки
+                if len(path) > 0:
+                    h, w = display_frame.shape[:2]
+                    first_point_y = int(path[0][1])  # Y координата первой точки
+                    
+                    # Проверяем, что координата валидна
+                    if 0 <= first_point_y < h:
+                        line_x = w - 100  # Позиция линии в правой части экрана (100 пикселей от края для лучшей видимости)
+                        
+                        # Рисуем пунктирную линию вверх от первой точки до верха экрана
+                        dash_length = 15
+                        gap_length = 8
+                        current_y = first_point_y
+                        
+                        # Используем более толстую линию для видимости
+                        line_thickness = max(2, config.LINE_THICKNESS)
+                        
+                        # Цвет пунктира - белый (BGR: 255, 255, 255)
+                        dash_color = (255, 255, 255)
+                        
+                        while current_y > 0:
+                            # Рисуем сегмент пунктира
+                            end_y = max(0, current_y - dash_length)
+                            if end_y < current_y:  # Убеждаемся, что есть что рисовать
+                                cv2.line(display_frame, (line_x, current_y), (line_x, end_y), 
+                                        dash_color, line_thickness)
+                            # Переходим к следующему сегменту
+                            current_y = end_y - gap_length
+                            if current_y <= 0:
+                                break
             
             # Добавляем надпись в углу экрана, если включен режим трекинга штанги
             if self.gui.enable_barbell.get():
                 try:
                     # Используем PIL для корректного отображения русского текста
                     image_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
-                    draw = ImageDraw.Draw(image_pil)
+                    draw = ImageDraw.Draw(image_pil, 'RGBA')
                     try:
                         font = ImageFont.truetype("arial.ttf", 36)
                     except:
                         font = ImageFont.load_default()
                     
                     text = "ТРАЕКТОРИЯ ШТАНГИ"
-                    # Позиция в левом верхнем углу с небольшим отступом
-                    text_x = 1350
-                    text_y = 940
+                    # Позиция в правом верхнем углу, смещена влево
+                    frame_width = display_frame.shape[1]
+                    # Получаем размер текста для правильного позиционирования
+                    bbox = draw.textbbox((0, 0), text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    # Позиционируем в правом верхнем углу, смещено влево (больше отступ)
+                    text_x = frame_width - text_width - 150  # 150 пикселей отступ от правого края (смещено влево)
+                    text_y = 20  # 20 пикселей от верхнего края
+                    
+                    # Рисуем полупрозрачный синий фон для текста
+                    padding_x = 15
+                    padding_y = 10
+                    bg_x1 = text_x - padding_x
+                    bg_y1 = text_y - padding_y
+                    bg_x2 = text_x + text_width + padding_x
+                    bg_y2 = text_y + text_height + padding_y
+                    
+                    # Создаем отдельный слой для фона с прозрачностью
+                    overlay = Image.new('RGBA', image_pil.size, (0, 0, 0, 0))
+                    overlay_draw = ImageDraw.Draw(overlay)
+                    # Синий полупрозрачный фон (R, G, B, Alpha) - 180 из 255 = ~70% непрозрачности
+                    bg_color = (0, 100, 200, 180)
+                    overlay_draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=bg_color)
+                    # Накладываем полупрозрачный фон на изображение
+                    image_pil = Image.alpha_composite(image_pil.convert('RGBA'), overlay).convert('RGB')
+                    draw = ImageDraw.Draw(image_pil)
                     
                     # Рисуем обводку текста для лучшей читаемости
                     outline_thickness = 2
@@ -1020,12 +1078,15 @@ class UnifiedTrackingApp:
                             if dx != 0 or dy != 0:
                                 draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
                     
-                    # Рисуем основной текст
+                    # Рисуем основной текст (белый)
                     draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
+                    
+                    # Конвертируем обратно в BGR для OpenCV
                     display_frame = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
                 except Exception as e:
                     # Если не удалось использовать PIL, используем cv2 (может не отобразить кириллицу)
-                    cv2.putText(display_frame, "Path tracking active", (10, 30), 
+                    frame_width = display_frame.shape[1]
+                    cv2.putText(display_frame, "Path tracking active", (frame_width - 200, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Отправка UDP данных

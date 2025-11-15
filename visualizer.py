@@ -76,33 +76,69 @@ class Visualizer:
             frame: Кадр для рисования
             path: Путь штанги [(x, y, timestamp), ...]
         """
-        if len(path) < 2:
+        if len(path) < 1:
             return
         
-        xs = np.array([p[0] for p in path], dtype=np.float32)
-        ys = np.array([p[1] for p in path], dtype=np.float32)
-        
-        # Применяем сглаживание если включено
-        if config.PATH_SMOOTHING_ENABLED:
-            if config.PATH_SMOOTHING_METHOD == "savgol":
-                xs_draw, ys_draw = self._smooth_path_savgol(xs, ys)
-            elif config.PATH_SMOOTHING_METHOD == "moving_average":
-                xs_draw, ys_draw = self._smooth_path_moving_average(xs, ys)
+        # Рисуем путь только если есть минимум 2 точки
+        if len(path) >= 2:
+            xs = np.array([p[0] for p in path], dtype=np.float32)
+            ys = np.array([p[1] for p in path], dtype=np.float32)
+            
+            # Применяем сглаживание если включено
+            if config.PATH_SMOOTHING_ENABLED:
+                if config.PATH_SMOOTHING_METHOD == "savgol":
+                    xs_draw, ys_draw = self._smooth_path_savgol(xs, ys)
+                elif config.PATH_SMOOTHING_METHOD == "moving_average":
+                    xs_draw, ys_draw = self._smooth_path_moving_average(xs, ys)
+                else:
+                    xs_draw, ys_draw = xs, ys
             else:
                 xs_draw, ys_draw = xs, ys
-        else:
-            xs_draw, ys_draw = xs, ys
+            
+            # Цвет пути - красный (BGR: 0, 0, 255)
+            path_color = (0, 0, 255)
+            
+            # Рисуем линии между соседними точками пути (сглаженные)
+            for i in range(1, len(xs_draw)):
+                pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+                pt2 = (int(xs_draw[i]), int(ys_draw[i]))
+                cv2.line(frame, pt1, pt2, path_color, self.line_thickness)
+            
+            # Рисуем точки пути (реже, чтобы не перегружать визуализацию)
+            step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
+            for i in range(0, len(xs_draw), step):
+                cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
         
-        # Рисуем линии между соседними точками пути (сглаженные)
-        for i in range(1, len(xs_draw)):
-            pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
-            pt2 = (int(xs_draw[i]), int(ys_draw[i]))
-            cv2.line(frame, pt1, pt2, self.color_barbell, self.line_thickness)
-        
-        # Рисуем точки пути (реже, чтобы не перегружать визуализацию)
-        step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
-        for i in range(0, len(xs_draw), step):
-            cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, self.color_barbell, -1)
+        # Рисуем вертикальную пунктирную линию в правой части экрана от первой точки
+        if len(path) > 0:
+            h, w = frame.shape[:2]
+            first_point_y = int(path[0][1])  # Y координата первой точки
+            
+            # Проверяем, что координата валидна
+            if 0 <= first_point_y < h:
+                line_x = w - 100  # Позиция линии в правой части экрана (100 пикселей от края для лучшей видимости)
+                
+                # Рисуем пунктирную линию вверх от первой точки до верха экрана
+                dash_length = 15
+                gap_length = 8
+                current_y = first_point_y
+                
+                # Используем более толстую линию для видимости
+                line_thickness = max(2, self.line_thickness)
+                
+                # Цвет пунктира - белый (BGR: 255, 255, 255)
+                dash_color = (255, 255, 255)
+                
+                while current_y > 0:
+                    # Рисуем сегмент пунктира
+                    end_y = max(0, current_y - dash_length)
+                    if end_y < current_y:  # Убеждаемся, что есть что рисовать
+                        cv2.line(frame, (line_x, current_y), (line_x, end_y), 
+                                dash_color, line_thickness)
+                    # Переходим к следующему сегменту
+                    current_y = end_y - gap_length
+                    if current_y <= 0:
+                        break
     
     def _smooth_path_savgol(self, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
