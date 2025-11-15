@@ -649,26 +649,30 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # Используем настройки шрифта из GUI
         outline_thickness = max(2, font_thickness)  # Обводка толще основного текста
         
-        # Рисуем обводку текста
-        # cv2.putText(overlay, f"{angle_val:.0f}", (pb[0] + 10, pb[1] - 10),
-                   # cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 0), outline_thickness, cv2.LINE_AA)
-
-
-
+        # Определяем, левая это часть или правая
+        is_left_side = limb.startswith("left")
+        
+        # Позиционирование текста: левая часть - слева от сустава, правая - справа
+        offset_x = -240 if is_left_side else 160  # Смещение по X: отрицательное для левой, положительное для правой
+        
         image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGRA2RGB))
         draw = ImageDraw.Draw(image_pil)
         font = ImageFont.truetype("arial.ttf",font_size*50) if hasattr(ImageFont, 'truetype') else ImageFont.load_default()
+        
+        # Позиция текста: слева от сустава для левой части, справа для правой
+        text_x = pb[0] + offset_x
+        text_y = pb[1] - 10
+        
+        # Рисуем обводку текста
         if outline_thickness > 1:
             for dx in [-outline_thickness, 0, outline_thickness]:
                 for dy in [-outline_thickness, 0, outline_thickness]:
                     if dx != 0 or dy != 0:
-                        draw.text((pb[0] + 10 + 100, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))
-        draw.text((pb[0] +10 + 100, pb[1] - 10), f"{angle_val:.0f}°", font=font, fill=(255,255,255))   
-        overlay  = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-        # °
+                        draw.text((text_x + dx, text_y + dy), f"{angle_val:.0f}°", font=font, fill=(0, 0, 0))
+        
         # Рисуем основной текст
-        # cv2.putText(overlay, f"{angle_val:.0f}", (pb[0] + 10, pb[1] - 10),
-          #          cv2.FONT_HERSHEY_SIMPLEX, font_size, bone_bgr, font_thickness, cv2.LINE_AA)
+        draw.text((text_x, text_y), f"{angle_val:.0f}°", font=font, fill=(255, 255, 255))   
+        overlay = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
         
         for idx in [a, b, c]:
             x, y = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
@@ -992,6 +996,37 @@ class UnifiedTrackingApp:
                         pt1 = (int(path[i-1][0]), int(path[i-1][1]))
                         pt2 = (int(path[i][0]), int(path[i][1]))
                         cv2.line(display_frame, pt1, pt2, config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+            
+            # Добавляем надпись в углу экрана, если включен режим трекинга штанги
+            if self.gui.enable_barbell.get():
+                try:
+                    # Используем PIL для корректного отображения русского текста
+                    image_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(image_pil)
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 36)
+                    except:
+                        font = ImageFont.load_default()
+                    
+                    text = "ТРАЕКТОРИЯ ШТАНГИ"
+                    # Позиция в левом верхнем углу с небольшим отступом
+                    text_x = 1350
+                    text_y = 940
+                    
+                    # Рисуем обводку текста для лучшей читаемости
+                    outline_thickness = 2
+                    for dx in [-outline_thickness, 0, outline_thickness]:
+                        for dy in [-outline_thickness, 0, outline_thickness]:
+                            if dx != 0 or dy != 0:
+                                draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
+                    
+                    # Рисуем основной текст
+                    draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
+                    display_frame = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    # Если не удалось использовать PIL, используем cv2 (может не отобразить кириллицу)
+                    cv2.putText(display_frame, "Path tracking active", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Отправка UDP данных
             udp_data = {

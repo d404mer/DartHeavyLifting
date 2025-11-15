@@ -219,7 +219,7 @@ PATH_SMOOTHING_ENABLED = True
 # Включить сглаживание траектории штанги при отрисовке
 # True = путь рисуется плавно, даже если детектирование дрожит
 # False = путь рисуется точно по точкам детектирования
-PATH_SMOOTHING_METHOD = "savgol"
+PATH_SMOOTHING_METHOD = "moving_average"
 # "savgol" | "moving_average" | "none"
 # "savgol" - фильтр Савицкого-Голея (рекомендуется, очень плавно)
 # "moving_average" - скользящее среднее (проще, быстрее)
