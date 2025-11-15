@@ -983,79 +983,7 @@ class UnifiedTrackingApp:
             # Визуализация пути штанги будет выполнена после изменения размера кадра
             # (чтобы координаты пути соответствовали масштабированному кадру)
             
-            # Добавляем надпись в углу экрана, если включен режим трекинга штанги
-            if self.gui.enable_barbell.get():
-                try:
-                    # Используем PIL для корректного отображения русского текста
-                    image_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
-                    draw = ImageDraw.Draw(image_pil, 'RGBA')
-                    # Пробуем использовать более красивый шрифт
-                    font = None
-                    font_paths = [
-                        "C:/Windows/Fonts/segoeui.ttf",  # Segoe UI (современный, красивый)
-                        "C:/Windows/Fonts/calibri.ttf",  # Calibri
-                        "C:/Windows/Fonts/arial.ttf",    # Arial
-                        "arial.ttf"                      # Локальный Arial
-                    ]
-                    font_size = 40  # Немного увеличенный размер для лучшей читаемости
-                    for font_path in font_paths:
-                        try:
-                            font = ImageFont.truetype(font_path, font_size)
-                            break
-                        except:
-                            continue
-                    if font is None:
-                        try:
-                            font = ImageFont.truetype("arial.ttf", font_size)
-                        except:
-                            font = ImageFont.load_default()
-                    
-                    text = "ТРАЕКТОРИЯ ШТАНГИ"
-                    # Позиция в правом верхнем углу, смещена влево
-                    frame_width = display_frame.shape[1]
-                    # Получаем размер текста для правильного позиционирования
-                    bbox = draw.textbbox((0, 0), text, font=font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
-                    # Позиционируем в правом верхнем углу, смещено влево (больше отступ)
-                    text_x = frame_width - text_width - 150  # 150 пикселей отступ от правого края (смещено влево)
-                    text_y = 20  # 20 пикселей от верхнего края
-                    
-                    # Рисуем полупрозрачный синий фон для текста
-                    padding_x = 15
-                    padding_y = 10
-                    bg_x1 = text_x - padding_x
-                    bg_y1 = text_y - padding_y
-                    bg_x2 = text_x + text_width + padding_x
-                    bg_y2 = text_y + text_height + padding_y
-                    
-                    # Создаем отдельный слой для фона с прозрачностью
-                    overlay = Image.new('RGBA', image_pil.size, (0, 0, 0, 0))
-                    overlay_draw = ImageDraw.Draw(overlay)
-                    # Синий полупрозрачный фон (R, G, B, Alpha) - 180 из 255 = ~70% непрозрачности
-                    bg_color = (0, 100, 200, 180)
-                    overlay_draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=bg_color)
-                    # Накладываем полупрозрачный фон на изображение
-                    image_pil = Image.alpha_composite(image_pil.convert('RGBA'), overlay).convert('RGB')
-                    draw = ImageDraw.Draw(image_pil)
-                    
-                    # Рисуем обводку текста для лучшей читаемости
-                    outline_thickness = 2
-                    for dx in [-outline_thickness, 0, outline_thickness]:
-                        for dy in [-outline_thickness, 0, outline_thickness]:
-                            if dx != 0 or dy != 0:
-                                draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
-                    
-                    # Рисуем основной текст (белый)
-                    draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
-                    
-                    # Конвертируем обратно в BGR для OpenCV
-                    display_frame = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-                except Exception as e:
-                    # Если не удалось использовать PIL, используем cv2 (может не отобразить кириллицу)
-                    frame_width = display_frame.shape[1]
-                    cv2.putText(display_frame, "Path tracking active", (frame_width - 200, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Изображение будет добавлено после изменения размера кадра
             
             # Отправка UDP данных
             udp_data = {
@@ -1199,6 +1127,35 @@ class UnifiedTrackingApp:
             
             # Обновление предпросмотра
             self.root.after(0, self.gui.update_preview, display_frame.copy())
+            
+            # Накладываем PNG изображение поверх видео через PIL
+            if self.gui.enable_barbell.get():
+                try:
+                    logo_path = "траектория_штанги.png"  # Путь к PNG файлу
+                    logo_img = Image.open(logo_path)
+                    
+                    # Получаем размеры кадра
+                    frame_height, frame_width = display_frame.shape[:2]
+                    
+                    # Масштабируем изображение до размеров кадра
+                    logo_img = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    
+                    # Конвертируем кадр в PIL Image
+                    frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    
+                    # Если изображение с прозрачностью (RGBA), используем alpha composite
+                    if logo_img.mode == 'RGBA':
+                        frame_pil = frame_pil.convert('RGBA')
+                        frame_pil.paste(logo_img, (0, 0), logo_img)
+                        frame_pil = frame_pil.convert('RGB')
+                    else:
+                        frame_pil.paste(logo_img, (0, 0))
+                    
+                    # Конвертируем обратно в BGR для OpenCV
+                    display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    # Если не удалось загрузить изображение, используем обычный кадр
+                    pass
             
             # Отображение
             cv2.imshow("Unified Tracking (ESC to stop)", display_frame)
