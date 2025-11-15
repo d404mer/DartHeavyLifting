@@ -22,6 +22,7 @@ from collections import deque
 from urllib.parse import parse_qs, unquote
 from PIL import ImageFont, ImageDraw, Image
 
+
 # Импорты из проекта
 import config
 from pose_tracker import PoseTracker
@@ -614,11 +615,66 @@ class ProcThread(threading.Thread):
 
 # -------------------- Отрисовка скелета --------------------
 def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius, font_size=0.7, font_thickness=1):
-    """Рисует скелет с углами"""
+    """Рисует скелет с углами, скрывает когда человек выходит из центра"""
     if landmarks is None:
         return frame
+    
     h, w = frame.shape[:2]
+    
+    # Проверяем, находится ли человек в центре экрана
+    person_in_center = False
+    try:
+        # Используем координаты головы и ног для определения положения человека по высоте
+        head = landmarks[0]  # Голова - самая верхняя точка
+        left_foot = landmarks[27]  # Левая ступня
+        right_foot = landmarks[28]  # Правая ступня
+
+        # Центр по X - голова, по Y - середина между головой и ступнями
+        person_center_x = head.x
+        person_center_y = (head.y + (left_foot.y + right_foot.y) / 2) / 2
+        
+        # Определяем центральную зону 
+        center_zone_margin = 0.35  # 35% с каждой стороны - слепая зона
+        center_left = center_zone_margin
+        center_right = 1 - center_zone_margin
+        center_top = center_zone_margin
+        center_bottom = 1 - center_zone_margin
+        
+        # Проверяем, находится ли человек в центральной зоне
+        if (center_left <= person_center_x <= center_right and 
+            center_top <= person_center_y <= center_bottom):
+            person_in_center = True
+            
+    except (IndexError, AttributeError):
+        # Если не можем определить положение, считаем что человек не в центре
+        person_in_center = False
+    
+    # Если человек вышел из центра экрана, не отображаем графику
+    if not person_in_center:
+        print("⚠️ Человек вышел из центра экрана - графика скрыта")
+        return frame
+    
+    # Создаем копию кадра для overlay
     overlay = frame.copy()
+    
+    # Параметры статичной подложки
+    panel_width = 500
+    panel_height = 800
+    panel_x = 1200  # правая часть экрана
+    panel_y = (h - panel_height) // 2  # по центру по вертикали
+    panel_color = (50, 50, 50)  # серый цвет
+    alpha = 0.5  # 50% прозрачность
+
+    # Рисуем полупрозрачную плашку
+    cv2.rectangle(overlay, (panel_x, panel_y), 
+                  (panel_x + panel_width, panel_y + panel_height), 
+                  panel_color, -1)
+
+    # Накладываем с прозрачностью
+    frame_with_panel = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+    
+    # Теперь работаем с кадром, на котором есть плашка
+    overlay = frame_with_panel.copy()
     
     limbs = {
         "left_arm": (11, 13, 15),
@@ -630,36 +686,43 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     bone_bgr = tuple(int(bone_color[i:i+2], 16) for i in (5, 3, 1))
     joint_bgr = tuple(int(joint_color[i:i+2], 16) for i in (5, 3, 1))
     
+    # Отрисовываем скелет в координатах (+400)
     for limb, (a, b, c) in limbs.items():
         try:
-            pa = (int(landmarks[a].x * w+480), int(landmarks[a].y * h))
-            pb = (int(landmarks[b].x * w+480), int(landmarks[b].y * h))
-            pc = (int(landmarks[c].x * w+480), int(landmarks[c].y * h))
-        except:
+            pa = (int(landmarks[a].x * w + 500), int(landmarks[a].y * h))
+            pb = (int(landmarks[b].x * w + 500), int(landmarks[b].y * h))
+            pc = (int(landmarks[c].x * w + 500), int(landmarks[c].y * h))
+        except (IndexError, AttributeError):
             continue
         
+        # Рисуем обводку костей
         outline_width = bone_width + 2
         cv2.line(overlay, pa, pb, (0, 0, 0), outline_width, cv2.LINE_AA)
         cv2.line(overlay, pb, pc, (0, 0, 0), outline_width, cv2.LINE_AA)
+        
+        # Рисуем основные кости
         cv2.line(overlay, pa, pb, bone_bgr, bone_width, cv2.LINE_AA)
         cv2.line(overlay, pb, pc, bone_bgr, bone_width, cv2.LINE_AA)
         
         angle_val = angles.get(limb, 0.0)
         
         # Используем настройки шрифта из GUI
-        outline_thickness = max(2, font_thickness)  # Обводка толще основного текста
+        outline_thickness = max(2, font_thickness)
         
         # Определяем, левая это часть или правая
         is_left_side = limb.startswith("left")
         
-        # Позиционирование текста: левая часть - слева от сустава, правая - справа
-        offset_x = -240 if is_left_side else 160  # Смещение по X: отрицательное для левой, положительное для правой
+        # Позиционирование текста
+        offset_x = -40 if is_left_side else 20
         
-        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGRA2RGB))
+        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(image_pil)
-        font = ImageFont.truetype("arial.ttf",font_size*50) if hasattr(ImageFont, 'truetype') else ImageFont.load_default()
+        #try:
+        font = ImageFont.truetype("arial.ttf", int(font_size * 50))
+        # except:
+            # font = ImageFont.load_default()
         
-        # Позиция текста: слева от сустава для левой части, справа для правой
+        # Позиция текста
         text_x = pb[0] + offset_x
         text_y = pb[1] - 10
         
@@ -674,12 +737,16 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         draw.text((text_x, text_y), f"{angle_val:.0f}°", font=font, fill=(255, 255, 255))   
         overlay = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
         
+        # Рисуем суставы
         for idx in [a, b, c]:
-            x, y = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
-            cv2.circle(overlay, (x+480, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
-            cv2.circle(overlay, (x+480, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
+            try:
+                x, y = int(landmarks[idx].x * w + 500), int(landmarks[idx].y * h)
+                cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
+                cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
+            except (IndexError, AttributeError):
+                continue
     
-    return cv2.addWeighted(overlay, 0.9, frame, 0.1, 0)
+    return overlay
 # -------------------- Основной класс приложения --------------------
 class UnifiedTrackingApp:
     def __init__(self):
