@@ -568,11 +568,33 @@ class ProcThread(threading.Thread):
         self.pose_tracker = pose_tracker
         self.barbell_tracker = barbell_tracker
         self.enable_barbell = enable_barbell
+        # Коэффициенты масштабирования (будут вычислены при первом кадре)
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.original_h = None
+        self.original_w = None
+    
+    def _scale_pose_data(self, pose_data, scale_x, scale_y):
+        """Масштабирование координат позы обратно на оригинальное разрешение"""
+        if not pose_data or not pose_data.get('all_landmarks'):
+            return pose_data
+        
+        # MediaPipe возвращает нормализованные координаты (0-1), поэтому просто обновляем размеры кадра
+        # Но если мы обрабатывали на уменьшенном кадре, нужно убедиться что координаты правильные
+        # На самом деле MediaPipe работает с нормализованными координатами, так что масштабирование не нужно
+        # Но нужно обновить размеры кадра в данных позы если они используются
+        return pose_data
+    
+    def _scale_barbell_pos(self, barbell_pos, scale_x, scale_y):
+        """Масштабирование координат штанги обратно на оригинальное разрешение"""
+        if barbell_pos is None:
+            return None
+        return (int(barbell_pos[0] * scale_x), int(barbell_pos[1] * scale_y))
     
     def run(self):
         while not self.stop_event.is_set():
             try:
-                frame = self.in_q.get(timeout=0.05)
+                original_frame = self.in_q.get(timeout=0.05)
             except queue.Empty:
                 time.sleep(0.01)
                 continue
@@ -582,14 +604,38 @@ class ProcThread(threading.Thread):
             pose_data = None
             barbell_pos = None
             
-            # Обработка позы
+            # Сохраняем оригинальные размеры
+            orig_h, orig_w = original_frame.shape[:2]
+            
+            # Вычисляем коэффициенты масштабирования (каждый кадр, на случай изменения размера)
+            if orig_w != self.proc_w or orig_h != self.proc_h:
+                self.scale_x = orig_w / self.proc_w
+                self.scale_y = orig_h / self.proc_h
+                if self.original_h != orig_h or self.original_w != orig_w:
+                    self.original_h = orig_h
+                    self.original_w = orig_w
+                    print(f"📐 Масштабирование: обработка {self.proc_w}x{self.proc_h} → вывод {orig_w}x{orig_h} (scale: {self.scale_x:.2f}x{self.scale_y:.2f})")
+            else:
+                self.scale_x = 1.0
+                self.scale_y = 1.0
+                if self.original_h != orig_h or self.original_w != orig_w:
+                    self.original_h = orig_h
+                    self.original_w = orig_w
+            
+            # Уменьшаем кадр для обработки (только если нужно)
+            if orig_w != self.proc_w or orig_h != self.proc_h:
+                small_frame = cv2.resize(original_frame, (self.proc_w, self.proc_h), interpolation=cv2.INTER_AREA)  # INTER_AREA быстрее для уменьшения
+            else:
+                small_frame = original_frame
+            
+            # Обработка позы на уменьшенном кадре
             if self.pose_tracker and self.idx % self.every_n == 0:
-                pose_data = self.pose_tracker.process_frame(frame)
+                pose_data = self.pose_tracker.process_frame(small_frame)
                 
-                # Обновление области поиска штанги
+                # Обновление области поиска штанги (на уменьшенном кадре)
                 if self.enable_barbell and pose_data and config.BARBELL_USE_SEARCH_REGION and pose_data.get('all_landmarks'):
                     lm = pose_data['all_landmarks']
-                    h, w = frame.shape[:2]
+                    h, w = small_frame.shape[:2]
                     LEFT_WRIST, RIGHT_WRIST = 15, 16
                     left_wrist_px = None
                     right_wrist_px = None
@@ -598,18 +644,65 @@ class ProcThread(threading.Thread):
                     if lm[RIGHT_WRIST].visibility > 0.5:
                         right_wrist_px = (int(lm[RIGHT_WRIST].x * w), int(lm[RIGHT_WRIST].y * h))
                     if left_wrist_px or right_wrist_px:
-                        self.barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, frame.shape)
+                        self.barbell_tracker.update_search_region(left_wrist_px, right_wrist_px, small_frame.shape)
             
-            # Обработка штанги
+            # Обработка штанги на уменьшенном кадре
             if self.enable_barbell:
-                barbell_pos = self.barbell_tracker.detect_barbell(frame, timestamp)
+                # Сохраняем длину пути до обработки
+                path_len_before = len(self.barbell_tracker.path) if hasattr(self.barbell_tracker, 'path') else 0
+                
+                # Масштабируем параметры радиуса для уменьшенного кадра
+                # Сохраняем оригинальные значения
+                original_min_radius = config.BARBELL_CIRCLE_MIN_RADIUS
+                original_max_radius = config.BARBELL_CIRCLE_MAX_RADIUS
+                
+                # Масштабируем радиусы пропорционально уменьшению кадра
+                if orig_w != self.proc_w or orig_h != self.proc_h:
+                    scale_radius = min(self.scale_x, self.scale_y)  # Используем меньший масштаб для консервативности
+                    scaled_min_radius = max(5, int(original_min_radius / scale_radius))
+                    scaled_max_radius = max(10, int(original_max_radius / scale_radius))
+                    config.BARBELL_CIRCLE_MIN_RADIUS = scaled_min_radius
+                    config.BARBELL_CIRCLE_MAX_RADIUS = scaled_max_radius
+                    # Также масштабируем minDist
+                    original_min_dist = config.BARBELL_CIRCLE_MIN_DIST
+                    config.BARBELL_CIRCLE_MIN_DIST = max(10, int(original_min_dist / scale_radius))
+                    if self.idx == 1:  # Только при первом кадре
+                        print(f"🎯 Параметры штанги масштабированы: радиус {original_min_radius}-{original_max_radius} → {scaled_min_radius}-{scaled_max_radius} (scale: {scale_radius:.2f})")
+                
+                small_barbell_pos = self.barbell_tracker.detect_barbell(small_frame, timestamp)
+                
+                # Восстанавливаем оригинальные значения
+                if orig_w != self.proc_w or orig_h != self.proc_h:
+                    config.BARBELL_CIRCLE_MIN_RADIUS = original_min_radius
+                    config.BARBELL_CIRCLE_MAX_RADIUS = original_max_radius
+                    config.BARBELL_CIRCLE_MIN_DIST = original_min_dist
+                
+                # Масштабируем координаты обратно на оригинальное разрешение
+                if small_barbell_pos:
+                    barbell_pos = self._scale_barbell_pos(small_barbell_pos, self.scale_x, self.scale_y)
+                    
+                    # Масштабируем новые точки пути (те что были добавлены в detect_barbell)
+                    # last_position и smoothed_position остаются в координатах уменьшенного кадра
+                    # (они используются для выбора окружности на уменьшенном кадре в следующем кадре)
+                    if hasattr(self.barbell_tracker, 'path') and len(self.barbell_tracker.path) > path_len_before:
+                        # Масштабируем только новые точки (добавленные в этом кадре)
+                        # detect_barbell добавляет точки в координатах уменьшенного кадра
+                        for i in range(path_len_before, len(self.barbell_tracker.path)):
+                            x, y, ts = self.barbell_tracker.path[i]
+                            # Все новые точки должны быть в координатах уменьшенного кадра, масштабируем их
+                            self.barbell_tracker.path[i] = (x * self.scale_x, y * self.scale_y, ts)
+                else:
+                    barbell_pos = None
+            else:
+                barbell_pos = None
             
+            # Возвращаем оригинальный кадр + результаты обработки
             try:
-                self.out_q.put((frame, pose_data, barbell_pos, timestamp), block=False)
+                self.out_q.put((original_frame, pose_data, barbell_pos, timestamp), block=False)
             except queue.Full:
                 try:
                     _ = self.out_q.get_nowait()
-                    self.out_q.put((frame, pose_data, barbell_pos, timestamp), block=False)
+                    self.out_q.put((original_frame, pose_data, barbell_pos, timestamp), block=False)
                 except:
                     pass
 
@@ -826,6 +919,10 @@ class UnifiedTrackingApp:
         # Throttling для GUI обновления (максимум 30 FPS для предпросмотра)
         self._last_preview_update = 0.0
         self._preview_update_interval = 1.0 / 30.0  # 30 FPS для GUI
+        
+        # Throttling для UDP (максимум 30 FPS для UDP)
+        self._last_udp_send = 0.0
+        self._udp_send_interval = 1.0 / 30.0  # 30 FPS для UDP
         
         # UDP
         try:
@@ -1102,166 +1199,80 @@ class UnifiedTrackingApp:
                     left_knee_angle = joints.get('left_knee_angle')
                     right_knee_angle = joints.get('right_knee_angle')
             
-            # Визуализация пути штанги будет выполнена после изменения размера кадра
-            # (чтобы координаты пути соответствовали масштабированному кадру)
+            # Отправка UDP данных (с throttling - максимум 30 FPS)
+            now_udp = time.time()
+            if now_udp - self._last_udp_send >= self._udp_send_interval:
+                udp_data = {
+                    "timestamp": timestamp,
+                    "barbell": {
+                        "position": [int(barbell_pos[0]), int(barbell_pos[1])] if barbell_pos else None,
+                        "confidence": float(self.barbell_tracker.last_confidence) if (self.barbell_tracker and self.barbell_tracker.last_confidence) else None,
+                        "source": self.barbell_tracker.last_detection_source if self.barbell_tracker else None
+                    },
+                    "knee_positions": {
+                        "left_knee": list(left_knee_coords) if left_knee_coords else None,
+                        "right_knee": list(right_knee_coords) if right_knee_coords else None,
+                        "left_knee_angle": float(left_knee_angle) if left_knee_angle else None,
+                        "right_knee_angle": float(right_knee_angle) if right_knee_angle else None
+                    },
+                    "joints": joints_data,
+                    "barbell_path": [
+                        {"x": float(x), "y": float(y), "timestamp": float(ts)}
+                        for x, y, ts in (self.barbell_tracker.get_path() if self.barbell_tracker else [])
+                    ],
+                    "angles": {k: round(v,2) for k,v in angles.items()} if angles else {}
+                }
+                try:
+                    self.sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (self.ue_ip, self.ue_port))
+                except:
+                    pass
+                self._last_udp_send = now_udp
             
-            # Изображение будет добавлено после изменения размера кадра
-            
-            # Отправка UDP данных
-            udp_data = {
-                "timestamp": timestamp,
-                "barbell": {
-                    "position": [int(barbell_pos[0]), int(barbell_pos[1])] if barbell_pos else None,
-                    "confidence": float(self.barbell_tracker.last_confidence) if (self.barbell_tracker and self.barbell_tracker.last_confidence) else None,
-                    "source": self.barbell_tracker.last_detection_source if self.barbell_tracker else None
-                },
-                "knee_positions": {
-                    "left_knee": list(left_knee_coords) if left_knee_coords else None,
-                    "right_knee": list(right_knee_coords) if right_knee_coords else None,
-                    "left_knee_angle": float(left_knee_angle) if left_knee_angle else None,
-                    "right_knee_angle": float(right_knee_angle) if right_knee_angle else None
-                },
-                "joints": joints_data,
-                "barbell_path": [
-                    {"x": float(x), "y": float(y), "timestamp": float(ts)}
-                    for x, y, ts in (self.barbell_tracker.get_path() if self.barbell_tracker else [])
-                ],
-                "angles": {k: round(v,2) for k,v in angles.items()} if angles else {}
-            }
-            try:
-                self.sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (self.ue_ip, self.ue_port))
-            except:
-                pass
-            
-            # Изменение размера
+            # Рисуем путь штанги на оригинальном кадре (для NDI)
             original_h, original_w = display_frame.shape[:2]
-            if original_w != self.WINDOW_W or original_h != self.WINDOW_H:
-                # Вычисляем масштаб и смещение для масштабирования координат пути
-                scale = min(self.WINDOW_W / original_w, self.WINDOW_H / original_h)
-                new_w = int(original_w * scale)
-                new_h = int(original_h * scale)
-                offset_x = (self.WINDOW_W - new_w) // 2
-                offset_y = (self.WINDOW_H - new_h) // 2
+            if self.gui.enable_barbell.get() and self.barbell_tracker:
+                path = self.barbell_tracker.get_path()
+                path_offset_x = config.BARBELL_PATH_OFFSET_X
+                if len(path) >= 2:
+                    path_color = config.BARBELL_PATH_COLOR
+                    path_opacity = config.BARBELL_PATH_OPACITY
+                    # Оптимизация: используем polylines вместо множества line
+                    path_points = np.array([(int(x + path_offset_x), int(y)) for x, y, _ in path], dtype=np.int32)
+                    if path_opacity < 1.0:
+                        path_overlay = display_frame.copy()
+                        cv2.polylines(path_overlay, [path_points], False, path_color, config.LINE_THICKNESS, cv2.LINE_AA)
+                        cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                    else:
+                        cv2.polylines(display_frame, [path_points], False, path_color, config.LINE_THICKNESS, cv2.LINE_AA)
                 
-                # Масштабируем кадр
-                display_frame = resize_with_aspect(display_frame, self.WINDOW_W, self.WINDOW_H)
-                
-                # Рисуем путь штанги на масштабированном кадре с правильными координатами
-                if self.gui.enable_barbell.get() and self.barbell_tracker:
-                    path = self.barbell_tracker.get_path()
-                    path_offset_x = config.BARBELL_PATH_OFFSET_X
-                    if len(path) >= 2:
-                        path_color = config.BARBELL_PATH_COLOR
-                        path_opacity = config.BARBELL_PATH_OPACITY
-                        # Рисуем путь с учетом прозрачности
-                        if path_opacity < 1.0:
-                            path_overlay = display_frame.copy()
-                            for i in range(1, len(path)):
-                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
-                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
-                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
-                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
-                        else:
-                            for i in range(1, len(path)):
-                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
-                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
-                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
-                    
-                    # Рисуем пунктирную линию от первой точки пути gfgf
-                    if len(path) > 0:
-                        h, w = display_frame.shape[:2]
-                        first_point_x = int((path[0][0] + path_offset_x) * scale + offset_x)  # X координата первой точки (масштабированная со смещением)
-                        first_point_y = int(path[0][1] * scale + offset_y)  # Y координата первой точки (масштабированная)
-                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
-                            line_x = first_point_x  # Позиция линии по X координате первой точки
-                            # Масштабируем длину и промежуток пунктира для масштабированного кадра
-                            dash_length = int(config.BARBELL_DASH_LENGTH * scale)
-                            gap_length = int(config.BARBELL_DASH_GAP * scale)
-                            current_y = first_point_y
-                            line_thickness = max(1, int(config.BARBELL_DASH_THICKNESS * scale))
-                            
-                            # Создаем overlay для полупрозрачного пунктира
-                            overlay = display_frame.copy()
-                            dash_color = config.BARBELL_DASH_COLOR
-                            alpha = config.BARBELL_DASH_OPACITY
-                            
-                            while current_y > 0:
-                                end_y = max(0, current_y - dash_length)
-                                if end_y < current_y:
-                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
-                                            dash_color, line_thickness)
-                                current_y = end_y - gap_length
-                                if current_y <= 0:
-                                    break
-                            
-                            # Накладываем полупрозрачный overlay на кадр
-                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
-            else:
-                # Если размер не изменяется, рисуем путь напрямую
-                if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
-                    display_frame = self.visualizer.draw_frame(
-                        display_frame, 
-                        pose_data if self.gui.enable_pose.get() else None,
-                        barbell_pos, 
-                        self.barbell_tracker.get_path()
-                    )
-                elif self.gui.enable_barbell.get() and self.barbell_tracker:
-                    path = self.barbell_tracker.get_path()
-                    path_offset_x = config.BARBELL_PATH_OFFSET_X
-                    if len(path) >= 2:
-                        path_color = config.BARBELL_PATH_COLOR
-                        path_opacity = config.BARBELL_PATH_OPACITY
-                        # Рисуем путь с учетом прозрачности
-                        if path_opacity < 1.0:
-                            path_overlay = display_frame.copy()
-                            for i in range(1, len(path)):
-                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
-                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
-                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
-                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
-                        else:
-                            for i in range(1, len(path)):
-                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
-                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
-                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
-                    
-                    # Рисуем пунктирную линию от первой точки пути
-                    if len(path) > 0:
-                        h, w = display_frame.shape[:2]
-                        first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
-                        first_point_y = int(path[0][1])  # Y координата первой точки
-                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
-                            line_x = first_point_x  # Позиция линии по X координате первой точки
-                            dash_length = config.BARBELL_DASH_LENGTH
-                            gap_length = config.BARBELL_DASH_GAP
-                            current_y = first_point_y
-                            line_thickness = config.BARBELL_DASH_THICKNESS
-                            
-                            # Создаем overlay для полупрозрачного пунктира
-                            overlay = display_frame.copy()
-                            dash_color = config.BARBELL_DASH_COLOR
-                            alpha = config.BARBELL_DASH_OPACITY
-                            
-                            while current_y > 0:
-                                end_y = max(0, current_y - dash_length)
-                                if end_y < current_y:
-                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
-                                            dash_color, line_thickness)
-                                current_y = end_y - gap_length
-                                if current_y <= 0:
-                                    break
-                            
-                            # Накладываем полупрозрачный overlay на кадр
-                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
+                # Рисуем пунктирную линию от первой точки пути
+                if len(path) > 0:
+                    h, w = display_frame.shape[:2]
+                    first_point_x = int(path[0][0] + path_offset_x)
+                    first_point_y = int(path[0][1])
+                    if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                        line_x = first_point_x
+                        dash_length = config.BARBELL_DASH_LENGTH
+                        gap_length = config.BARBELL_DASH_GAP
+                        current_y = first_point_y
+                        line_thickness = config.BARBELL_DASH_THICKNESS
+                        
+                        overlay = display_frame.copy()
+                        dash_color = config.BARBELL_DASH_COLOR
+                        alpha = config.BARBELL_DASH_OPACITY
+                        
+                        while current_y > 0:
+                            end_y = max(0, current_y - dash_length)
+                            if end_y < current_y:
+                                cv2.line(overlay, (line_x, current_y), (line_x, end_y), dash_color, line_thickness)
+                            current_y = end_y - gap_length
+                            if current_y <= 0:
+                                break
+                        
+                        cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
             
-            # Обновление предпросмотра (с throttling - максимум 30 FPS)
-            now = time.time()
-            if now - self._last_preview_update >= self._preview_update_interval:
-                self.root.after(0, self.gui.update_preview, display_frame.copy())
-                self._last_preview_update = now
-            
-            # Накладываем PNG изображения из кэша (оптимизировано)
-            frame_height, frame_width = display_frame.shape[:2]
+            # Накладываем PNG изображения на оригинальный кадр (для NDI)
+            original_h, original_w = display_frame.shape[:2]
             needs_pil_conversion = False
             
             # Накладываем "суставы.png" если включен трекинг позы
@@ -1269,11 +1280,11 @@ class UnifiedTrackingApp:
                 try:
                     logo_img = self._cached_logos["pose"]
                     # Масштабируем только если размер изменился (кэшируем результат)
-                    cache_key = f"pose_{frame_width}_{frame_height}"
+                    cache_key = f"pose_{original_w}_{original_h}"
                     if not hasattr(self, '_cached_logos_resized'):
                         self._cached_logos_resized = {}
                     if cache_key not in self._cached_logos_resized:
-                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                        self._cached_logos_resized[cache_key] = logo_img.resize((original_w, original_h), Image.Resampling.LANCZOS)
                     needs_pil_conversion = True
                 except Exception as e:
                     pass
@@ -1283,24 +1294,24 @@ class UnifiedTrackingApp:
                 try:
                     logo_img = self._cached_logos["barbell"]
                     # Масштабируем только если размер изменился (кэшируем результат)
-                    cache_key = f"barbell_{frame_width}_{frame_height}"
+                    cache_key = f"barbell_{original_w}_{original_h}"
                     if not hasattr(self, '_cached_logos_resized'):
                         self._cached_logos_resized = {}
                     if cache_key not in self._cached_logos_resized:
-                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                        self._cached_logos_resized[cache_key] = logo_img.resize((original_w, original_h), Image.Resampling.LANCZOS)
                     needs_pil_conversion = True
                 except Exception as e:
                     pass
             
-            # Выполняем PIL конвертацию только если нужно наложить изображения
+            # Выполняем PIL конвертацию на оригинальном кадре (для NDI)
             if needs_pil_conversion:
                 try:
-                    # Конвертируем кадр в PIL Image (один раз)
+                    # Конвертируем оригинальный кадр в PIL Image
                     frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                     
                     # Накладываем изображения из кэша
                     if self.gui.enable_pose.get():
-                        cache_key = f"pose_{frame_width}_{frame_height}"
+                        cache_key = f"pose_{original_w}_{original_h}"
                         if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
                             logo_img = self._cached_logos_resized[cache_key]
                             if logo_img.mode == 'RGBA':
@@ -1311,7 +1322,7 @@ class UnifiedTrackingApp:
                                 frame_pil.paste(logo_img, (0, 0))
                     
                     if self.gui.enable_barbell.get():
-                        cache_key = f"barbell_{frame_width}_{frame_height}"
+                        cache_key = f"barbell_{original_w}_{original_h}"
                         if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
                             logo_img = self._cached_logos_resized[cache_key]
                             if logo_img.mode == 'RGBA':
@@ -1321,39 +1332,64 @@ class UnifiedTrackingApp:
                             else:
                                 frame_pil.paste(logo_img, (0, 0))
                     
-                    # Конвертируем обратно в BGR для OpenCV (один раз)
+                    # Конвертируем обратно в BGR для OpenCV
                     display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
                 except Exception as e:
                     pass
             
-            # Отображение
+            # Сохраняем оригинальный кадр с графикой для NDI
+            ndi_frame = display_frame.copy()
+            
+            # Изменение размера (только для отображения в окне, не для NDI)
+            # NDI всегда получает оригинальное разрешение
+            needs_resize_for_display = (original_w != self.WINDOW_W or original_h != self.WINDOW_H)
+            
+            # Масштабируем кадр только для отображения в окне (если нужно)
+            if needs_resize_for_display:
+                display_frame = resize_with_aspect(display_frame, self.WINDOW_W, self.WINDOW_H)
+            
+            # Обновление предпросмотра (с throttling - максимум 30 FPS)
+            now = time.time()
+            if now - self._last_preview_update >= self._preview_update_interval:
+                self.root.after(0, self.gui.update_preview, display_frame.copy())
+                self._last_preview_update = now
+            
+            # Отображение (может быть уменьшенным для окна)
             cv2.imshow("Unified Tracking (ESC to stop)", display_frame)
             
-            # Виртуальная камера
+            # Виртуальная камера (использует оригинальное разрешение)
             if self.virtual_cam:
                 try:
-                    self.virtual_cam.send(display_frame)
+                    # Виртуальная камера должна получать оригинальное разрешение
+                    if needs_resize_for_display:
+                        # Если кадр был уменьшен для отображения, используем оригинальный
+                        self.virtual_cam.send(ndi_frame)
+                    else:
+                        self.virtual_cam.send(display_frame)
                     self.virtual_cam.sleep_until_next_frame()
                 except:
                     pass
             
-            # NDI
+            # NDI (всегда оригинальное разрешение и FPS)
             if self.ndi_sender:
                 now = time.time()
-                if now - last_send >= 1.0 / 120:  # 30 FPS для NDI
-                    try:
-                        bgrx = np.zeros((self.WINDOW_H, self.WINDOW_W, 4), dtype=np.uint8)
-                        bgrx[:, :, :3] = display_frame
-                        vf = ndi.VideoFrameV2()
-                        vf.data = bgrx
-                        vf.xres = self.WINDOW_W
-                        vf.yres = self.WINDOW_H
-                        vf.FourCC = ndi.FOURCC_VIDEO_TYPE_BGRX
-                        ndi.send_send_video_v2(self.ndi_sender, vf)
-                    except Exception as e:
-                        if frame_counter % 300 == 0:
-                            print("NDI send error:", e)
-                    last_send = now
+                # NDI отправляем с оригинальным FPS (не ограничиваем)
+                try:
+                    # Используем оригинальный кадр для NDI
+                    ndi_send_frame = ndi_frame if needs_resize_for_display else display_frame
+                    ndi_h, ndi_w = ndi_send_frame.shape[:2]
+                    
+                    bgrx = np.zeros((ndi_h, ndi_w, 4), dtype=np.uint8)
+                    bgrx[:, :, :3] = ndi_send_frame
+                    vf = ndi.VideoFrameV2()
+                    vf.data = bgrx
+                    vf.xres = ndi_w
+                    vf.yres = ndi_h
+                    vf.FourCC = ndi.FOURCC_VIDEO_TYPE_BGRX
+                    ndi.send_send_video_v2(self.ndi_sender, vf)
+                except Exception as e:
+                    if frame_counter % 300 == 0:
+                        print("NDI send error:", e)
             
             # Обработка горячих клавиш
             k = cv2.waitKey(1) & 0xFF
