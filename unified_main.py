@@ -614,6 +614,18 @@ class ProcThread(threading.Thread):
                     pass
 
 # -------------------- Отрисовка скелета --------------------
+# Кэш для шрифтов (чтобы не загружать каждый раз)
+_font_cache = {}
+
+def _get_font(size):
+    """Получить шрифт из кэша"""
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.truetype("arial.ttf", size)
+        except:
+            _font_cache[size] = ImageFont.load_default()
+    return _font_cache[size]
+
 def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius, font_size=0.7, font_thickness=1, blind_zone_x=0.2, blind_zone_y=0.2):
     """Рисует скелет с углами, скрывает когда человек выходит из центра"""
     if landmarks is None:
@@ -652,7 +664,7 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     if not person_in_center:
         return frame
     
-    # Создаем копию кадра для overlay
+    # Копируем кадр для модификации
     overlay = frame.copy()
     
     # Параметры статичной подложки
@@ -664,15 +676,12 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     alpha = 0.3  # 30% прозрачность
 
     # Рисуем полупрозрачную плашку (только если человек в активной зоне)
-    cv2.rectangle(overlay, (panel_x, panel_y), 
+    panel_overlay = overlay.copy()
+    cv2.rectangle(panel_overlay, (panel_x, panel_y), 
                   (panel_x + panel_width, panel_y + panel_height), 
                   panel_color, -1)
-
     # Накладываем с прозрачностью
-    frame_with_panel = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-    
-    # Теперь работаем с кадром, на котором есть плашка
-    overlay = frame_with_panel.copy()
+    overlay = cv2.addWeighted(panel_overlay, alpha, overlay, 1 - alpha, 0)
     
     limbs = {
         "left_arm": (11, 13, 15),
@@ -683,6 +692,9 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     
     bone_bgr = tuple(int(bone_color[i:i+2], 16) for i in (5, 3, 1))
     joint_bgr = tuple(int(joint_color[i:i+2], 16) for i in (5, 3, 1))
+    
+    # Собираем все тексты для отрисовки за один раз (оптимизация PIL)
+    text_data = []
     
     # Отрисовываем скелет в координатах (+650). лучше 670
     for limb, (a, b, c) in limbs.items():
@@ -711,30 +723,12 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         is_left_side = limb.startswith("left")
         
         # Позиционирование текста: левая часть - слева от сустава, правая - справа
-        # Используем логику из примера: offset_x = -240 для левой, +160 для правой
-        offset_x = -240 if is_left_side else 160  # Смещение по X: отрицательное для левой, положительное для правой
-        
-        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(image_pil)
-        #try:
-        font = ImageFont.truetype("arial.ttf", int(font_size * 50))
-        # except:
-            # font = ImageFont.load_default()
-        
-        # Позиция текста: слева от сустава для левой части, справа для правой
+        offset_x = -240 if is_left_side else 160
         text_x = pb[0] + offset_x
         text_y = pb[1] - 10
         
-        # Рисуем обводку текста
-        if outline_thickness > 1:
-            for dx in [-outline_thickness, 0, outline_thickness]:
-                for dy in [-outline_thickness, 0, outline_thickness]:
-                    if dx != 0 or dy != 0:
-                        draw.text((text_x + dx, text_y + dy), f"{angle_val:.0f}°", font=font, fill=(0, 0, 0))
-        
-        # Рисуем основной текст
-        draw.text((text_x, text_y), f"{angle_val:.0f}°", font=font, fill=(255, 255, 255))   
-        overlay = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+        # Сохраняем данные для текста (отрисуем все за раз)
+        text_data.append((text_x, text_y, f"{angle_val:.0f}°", outline_thickness))
         
         # Рисуем суставы
         for idx in [a, b, c]:
@@ -744,6 +738,27 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
                 cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
             except (IndexError, AttributeError):
                 continue
+    
+    # Отрисовываем весь текст за один раз (минимизируем PIL конвертации)
+    if text_data:
+        font_size_int = int(font_size * 50)
+        font = _get_font(font_size_int)
+        # Конвертируем в PIL только один раз
+        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(image_pil)
+        
+        for text_x, text_y, text, outline_thickness in text_data:
+            # Рисуем обводку текста
+            if outline_thickness > 1:
+                for dx in [-outline_thickness, 0, outline_thickness]:
+                    for dy in [-outline_thickness, 0, outline_thickness]:
+                        if dx != 0 or dy != 0:
+                            draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
+            # Рисуем основной текст
+            draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
+        
+        # Конвертируем обратно один раз
+        overlay = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     
     return overlay
 # -------------------- Основной класс приложения --------------------
@@ -804,6 +819,14 @@ class UnifiedTrackingApp:
         # Угловой буфер для сглаживания
         self.angle_buffer = {k: [] for k in ["left_arm","right_arm","left_leg","right_leg"]}
         
+        # Кэш для PNG изображений (загружаем один раз)
+        self._cached_logos = {}
+        self._load_cached_logos()
+        
+        # Throttling для GUI обновления (максимум 30 FPS для предпросмотра)
+        self._last_preview_update = 0.0
+        self._preview_update_interval = 1.0 / 30.0  # 30 FPS для GUI
+        
         # UDP
         try:
             self.ue_ip, self.ue_port = config.UDP_HOST, config.UDP_PORT
@@ -813,6 +836,26 @@ class UnifiedTrackingApp:
         
         # Обработка закрытия окна
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
+    
+    def _load_cached_logos(self):
+        """Загрузка PNG изображений в кэш (один раз при инициализации)"""
+        try:
+            # Загружаем "суставы.png" если существует
+            if os.path.exists("суставы.png"):
+                self._cached_logos["pose"] = Image.open("суставы.png")
+                print("✅ Загружен кэш: суставы.png")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить суставы.png: {e}")
+            self._cached_logos["pose"] = None
+        
+        try:
+            # Загружаем "траектория_штанги.png" если существует
+            if os.path.exists("траектория_штанги.png"):
+                self._cached_logos["barbell"] = Image.open("траектория_штанги.png")
+                print("✅ Загружен кэш: траектория_штанги.png")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить траектория_штанги.png: {e}")
+            self._cached_logos["barbell"] = None
         
     def refresh_cameras(self):
         """Обновление списка камер"""
@@ -991,8 +1034,18 @@ class UnifiedTrackingApp:
             except queue.Empty:
                 # Используем последние данные если очередь пуста
                 frame, pose_data, barbell_pos, timestamp = last_frame, last_pose_data, last_barbell_pos, time.time()
-                
-            display_frame = frame.copy()
+            
+            # Копируем кадр только если будем его модифицировать
+            needs_modification = (self.gui.enable_pose.get() and pose_data and pose_data.get('all_landmarks') and self.gui.show_joints.get()) or \
+                                (self.gui.enable_barbell.get() and self.barbell_tracker) or \
+                                (self._cached_logos.get("pose") is not None) or \
+                                (self._cached_logos.get("barbell") is not None)
+            
+            if needs_modification:
+                display_frame = frame.copy()
+            else:
+                display_frame = frame
+            
             angles = {}
             left_knee_coords = None
             right_knee_coords = None
@@ -1201,64 +1254,76 @@ class UnifiedTrackingApp:
                             # Накладываем полупрозрачный overlay на кадр
                             cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
             
-            # Обновление предпросмотра
-            self.root.after(0, self.gui.update_preview, display_frame.copy())
-            if self.gui.enable_pose.get():
-                try:
-                    logo_path = "суставы.png"  # Путь к PNG файлу
-                    logo_img = Image.open(logo_path)
-                    
-                    # Получаем размеры кадра
-                    frame_height, frame_width = display_frame.shape[:2]
-                    
-                    # Масштабируем изображение до размеров кадра
-                    logo_img = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
-                    
-                    # Конвертируем кадр в PIL Image
-                    frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
-                    
-                    # Если изображение с прозрачностью (RGBA), используем alpha composite
-                    if logo_img.mode == 'RGBA':
-                        frame_pil = frame_pil.convert('RGBA')
-                        frame_pil.paste(logo_img, (0, 0), logo_img)
-                        frame_pil = frame_pil.convert('RGB')
-                    else:
-                        frame_pil.paste(logo_img, (0, 0))
-                    
-                    # Конвертируем обратно в BGR для OpenCV
-                    display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
-                except Exception as e:
-                    # Если не удалось загрузить изображение, используем обычный кадр
-                    pass
-
+            # Обновление предпросмотра (с throttling - максимум 30 FPS)
+            now = time.time()
+            if now - self._last_preview_update >= self._preview_update_interval:
+                self.root.after(0, self.gui.update_preview, display_frame.copy())
+                self._last_preview_update = now
             
-            # Накладываем PNG изображение поверх видео через PIL
-            if self.gui.enable_barbell.get():
+            # Накладываем PNG изображения из кэша (оптимизировано)
+            frame_height, frame_width = display_frame.shape[:2]
+            needs_pil_conversion = False
+            
+            # Накладываем "суставы.png" если включен трекинг позы
+            if self.gui.enable_pose.get() and self._cached_logos.get("pose") is not None:
                 try:
-                    logo_path = "траектория_штанги.png"  # Путь к PNG файлу
-                    logo_img = Image.open(logo_path)
-                    
-                    # Получаем размеры кадра
-                    frame_height, frame_width = display_frame.shape[:2]
-                    
-                    # Масштабируем изображение до размеров кадра
-                    logo_img = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
-                    
-                    # Конвертируем кадр в PIL Image
+                    logo_img = self._cached_logos["pose"]
+                    # Масштабируем только если размер изменился (кэшируем результат)
+                    cache_key = f"pose_{frame_width}_{frame_height}"
+                    if not hasattr(self, '_cached_logos_resized'):
+                        self._cached_logos_resized = {}
+                    if cache_key not in self._cached_logos_resized:
+                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    needs_pil_conversion = True
+                except Exception as e:
+                    pass
+            
+            # Накладываем "траектория_штанги.png" если включен трекинг штанги
+            if self.gui.enable_barbell.get() and self._cached_logos.get("barbell") is not None:
+                try:
+                    logo_img = self._cached_logos["barbell"]
+                    # Масштабируем только если размер изменился (кэшируем результат)
+                    cache_key = f"barbell_{frame_width}_{frame_height}"
+                    if not hasattr(self, '_cached_logos_resized'):
+                        self._cached_logos_resized = {}
+                    if cache_key not in self._cached_logos_resized:
+                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    needs_pil_conversion = True
+                except Exception as e:
+                    pass
+            
+            # Выполняем PIL конвертацию только если нужно наложить изображения
+            if needs_pil_conversion:
+                try:
+                    # Конвертируем кадр в PIL Image (один раз)
                     frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
                     
-                    # Если изображение с прозрачностью (RGBA), используем alpha composite
-                    if logo_img.mode == 'RGBA':
-                        frame_pil = frame_pil.convert('RGBA')
-                        frame_pil.paste(logo_img, (0, 0), logo_img)
-                        frame_pil = frame_pil.convert('RGB')
-                    else:
-                        frame_pil.paste(logo_img, (0, 0))
+                    # Накладываем изображения из кэша
+                    if self.gui.enable_pose.get():
+                        cache_key = f"pose_{frame_width}_{frame_height}"
+                        if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
+                            logo_img = self._cached_logos_resized[cache_key]
+                            if logo_img.mode == 'RGBA':
+                                frame_pil = frame_pil.convert('RGBA')
+                                frame_pil.paste(logo_img, (0, 0), logo_img)
+                                frame_pil = frame_pil.convert('RGB')
+                            else:
+                                frame_pil.paste(logo_img, (0, 0))
                     
-                    # Конвертируем обратно в BGR для OpenCV
+                    if self.gui.enable_barbell.get():
+                        cache_key = f"barbell_{frame_width}_{frame_height}"
+                        if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
+                            logo_img = self._cached_logos_resized[cache_key]
+                            if logo_img.mode == 'RGBA':
+                                frame_pil = frame_pil.convert('RGBA')
+                                frame_pil.paste(logo_img, (0, 0), logo_img)
+                                frame_pil = frame_pil.convert('RGB')
+                            else:
+                                frame_pil.paste(logo_img, (0, 0))
+                    
+                    # Конвертируем обратно в BGR для OpenCV (один раз)
                     display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
                 except Exception as e:
-                    # Если не удалось загрузить изображение, используем обычный кадр
                     pass
             
             # Отображение
