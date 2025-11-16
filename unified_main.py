@@ -614,14 +614,14 @@ class ProcThread(threading.Thread):
                     pass
 
 # -------------------- Отрисовка скелета --------------------
-def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius, font_size=0.7, font_thickness=1):
+def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius, font_size=0.7, font_thickness=1, blind_zone_x=0.2, blind_zone_y=0.2):
     """Рисует скелет с углами, скрывает когда человек выходит из центра"""
     if landmarks is None:
         return frame
     
     h, w = frame.shape[:2]
     
-    # Проверяем, находится ли человек в центре экрана
+    # Проверяем, находится ли человек в центре экрана (в активной зоне)
     person_in_center = False
     try:
         # Используем координаты головы и ног для определения положения человека по высоте
@@ -633,14 +633,13 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         person_center_x = head.x
         person_center_y = (head.y + (left_foot.y + right_foot.y) / 2) / 2
         
-        # Определяем центральную зону 
-        center_zone_margin = 0.35  # 35% с каждой стороны - слепая зона
-        center_left = center_zone_margin
-        center_right = 1 - center_zone_margin
-        center_top = center_zone_margin
-        center_bottom = 1 - center_zone_margin
+        # Определяем центральную зону (используем параметры из GUI)
+        center_left = blind_zone_x
+        center_right = 1 - blind_zone_x
+        center_top = blind_zone_y
+        center_bottom = 1 - blind_zone_y
         
-        # Проверяем, находится ли человек в центральной зоне
+        # Проверяем, находится ли человек в центральной зоне (не в слепой зоне)
         if (center_left <= person_center_x <= center_right and 
             center_top <= person_center_y <= center_bottom):
             person_in_center = True
@@ -649,9 +648,8 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # Если не можем определить положение, считаем что человек не в центре
         person_in_center = False
     
-    # Если человек вышел из центра экрана, не отображаем графику
+    # Если человек в слепой зоне, не отображаем графику (плашку и скелет)
     if not person_in_center:
-        print("⚠️ Человек вышел из центра экрана - графика скрыта")
         return frame
     
     # Создаем копию кадра для overlay
@@ -662,10 +660,10 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     panel_height = 800
     panel_x = 1200  # правая часть экрана
     panel_y = (h - panel_height) // 2  # по центру по вертикали
-    panel_color = (50, 50, 50)  # серый цвет
-    alpha = 0.5  # 50% прозрачность
+    panel_color = (220, 220, 220)  # белый цвет
+    alpha = 0.3  # 30% прозрачность
 
-    # Рисуем полупрозрачную плашку
+    # Рисуем полупрозрачную плашку (только если человек в активной зоне)
     cv2.rectangle(overlay, (panel_x, panel_y), 
                   (panel_x + panel_width, panel_y + panel_height), 
                   panel_color, -1)
@@ -686,12 +684,12 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     bone_bgr = tuple(int(bone_color[i:i+2], 16) for i in (5, 3, 1))
     joint_bgr = tuple(int(joint_color[i:i+2], 16) for i in (5, 3, 1))
     
-    # Отрисовываем скелет в координатах (+400)
+    # Отрисовываем скелет в координатах (+650). лучше 670
     for limb, (a, b, c) in limbs.items():
         try:
-            pa = (int(landmarks[a].x * w + 500), int(landmarks[a].y * h))
-            pb = (int(landmarks[b].x * w + 500), int(landmarks[b].y * h))
-            pc = (int(landmarks[c].x * w + 500), int(landmarks[c].y * h))
+            pa = (int(landmarks[a].x * w + 670), int(landmarks[a].y * h))
+            pb = (int(landmarks[b].x * w + 670), int(landmarks[b].y * h))
+            pc = (int(landmarks[c].x * w + 670), int(landmarks[c].y * h))
         except (IndexError, AttributeError):
             continue
         
@@ -712,8 +710,9 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # Определяем, левая это часть или правая
         is_left_side = limb.startswith("left")
         
-        # Позиционирование текста
-        offset_x = -40 if is_left_side else 20
+        # Позиционирование текста: левая часть - слева от сустава, правая - справа
+        # Используем логику из примера: offset_x = -240 для левой, +160 для правой
+        offset_x = -240 if is_left_side else 160  # Смещение по X: отрицательное для левой, положительное для правой
         
         image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(image_pil)
@@ -722,7 +721,7 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # except:
             # font = ImageFont.load_default()
         
-        # Позиция текста
+        # Позиция текста: слева от сустава для левой части, справа для правой
         text_x = pb[0] + offset_x
         text_y = pb[1] - 10
         
@@ -740,7 +739,7 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # Рисуем суставы
         for idx in [a, b, c]:
             try:
-                x, y = int(landmarks[idx].x * w + 500), int(landmarks[idx].y * h)
+                x, y = int(landmarks[idx].x * w + 670), int(landmarks[idx].y * h)
                 cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
                 cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
             except (IndexError, AttributeError):
@@ -1027,6 +1026,7 @@ class UnifiedTrackingApp:
                 # Отрисовка скелета
                 if self.gui.show_joints.get():
                     font_settings = self.gui.get_font_settings()
+                    blind_zones = self.gui.get_blind_zones()
                     display_frame = draw_overlay(
                         display_frame, lm, angles, 
                         self.gui.bone_color.get(), 
@@ -1034,7 +1034,9 @@ class UnifiedTrackingApp:
                         self.gui.bone_width.get(), 
                         self.gui.joint_radius.get(),
                         font_size=font_settings['font_size'],
-                        font_thickness=font_settings['font_thickness']
+                        font_thickness=font_settings['font_thickness'],
+                        blind_zone_x=blind_zones['blind_zone_x'],
+                        blind_zone_y=blind_zones['blind_zone_y']
                     )
                 
                 # Данные для UDP
@@ -1201,6 +1203,34 @@ class UnifiedTrackingApp:
             
             # Обновление предпросмотра
             self.root.after(0, self.gui.update_preview, display_frame.copy())
+            if self.gui.enable_pose.get():
+                try:
+                    logo_path = "суставы.png"  # Путь к PNG файлу
+                    logo_img = Image.open(logo_path)
+                    
+                    # Получаем размеры кадра
+                    frame_height, frame_width = display_frame.shape[:2]
+                    
+                    # Масштабируем изображение до размеров кадра
+                    logo_img = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    
+                    # Конвертируем кадр в PIL Image
+                    frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    
+                    # Если изображение с прозрачностью (RGBA), используем alpha composite
+                    if logo_img.mode == 'RGBA':
+                        frame_pil = frame_pil.convert('RGBA')
+                        frame_pil.paste(logo_img, (0, 0), logo_img)
+                        frame_pil = frame_pil.convert('RGB')
+                    else:
+                        frame_pil.paste(logo_img, (0, 0))
+                    
+                    # Конвертируем обратно в BGR для OpenCV
+                    display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    # Если не удалось загрузить изображение, используем обычный кадр
+                    pass
+
             
             # Накладываем PNG изображение поверх видео через PIL
             if self.gui.enable_barbell.get():

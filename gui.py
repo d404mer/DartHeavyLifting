@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.colorchooser import askcolor
 from typing import Callable, Optional
 import os
+import json
 
 class AppGUI:
     """Класс графического интерфейса приложения"""
@@ -67,6 +68,10 @@ class AppGUI:
         
         # Статус
         self.status_var = tk.StringVar(value="Готов к работе")
+        
+        # Слепые зоны скелета (в долях от 0 до 1, где 0.2 = 20% с каждой стороны)
+        self.skeleton_blind_zone_x = tk.DoubleVar(value=0.2)
+        self.skeleton_blind_zone_y = tk.DoubleVar(value=0.2)
         
         # Параметры обработки
         self.proc_w = 320
@@ -201,6 +206,9 @@ class AppGUI:
         
         # Настройки модели
         self._create_model_section(parent)
+        
+        # Слепые зоны скелета
+        self._create_skeleton_blind_zones_section(parent)
         
         # Выходные потоки
         self._create_output_section(parent)
@@ -696,7 +704,69 @@ class AppGUI:
         
         ttk.Label(model_row2, text="Трекинг:").pack(side='left', padx=(10,0))
         ttk.Entry(model_row2, textvariable=self.min_track, width=6).pack(side='left', padx=5)
+    
+    def _create_skeleton_blind_zones_section(self, parent):
+        """Секция настроек слепых зон скелета"""
+        blind_zones_frame = ttk.LabelFrame(parent, text="👁️ Слепые зоны скелета", padding=10)
+        blind_zones_frame.pack(fill='x', pady=(0, 10))
         
+        # Слепая зона по X
+        blind_zone_x_frame = ttk.Frame(blind_zones_frame)
+        blind_zone_x_frame.pack(fill='x', pady=5)
+        ttk.Label(blind_zone_x_frame, text="Слепая зона по X (%):").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        blind_zone_x_scale_frame = ttk.Frame(blind_zone_x_frame)
+        blind_zone_x_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            blind_zone_x_scale_frame,
+            from_=0.0,
+            to=0.5,
+            orient='horizontal',
+            variable=self.skeleton_blind_zone_x,
+            command=self.on_blind_zone_x_change,
+            length=120
+        ).pack(side='left')
+        
+        self.blind_zone_x_label = ttk.Label(
+            blind_zone_x_scale_frame,
+            text=f"{self.skeleton_blind_zone_x.get()*100:.1f}%",
+            width=6
+        )
+        self.blind_zone_x_label.pack(side='left', padx=5)
+        
+        # Слепая зона по Y
+        blind_zone_y_frame = ttk.Frame(blind_zones_frame)
+        blind_zone_y_frame.pack(fill='x', pady=5)
+        ttk.Label(blind_zone_y_frame, text="Слепая зона по Y (%):").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        blind_zone_y_scale_frame = ttk.Frame(blind_zone_y_frame)
+        blind_zone_y_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
+        
+        ttk.Scale(
+            blind_zone_y_scale_frame,
+            from_=0.0,
+            to=0.5,
+            orient='horizontal',
+            variable=self.skeleton_blind_zone_y,
+            command=self.on_blind_zone_y_change,
+            length=120
+        ).pack(side='left')
+        
+        self.blind_zone_y_label = ttk.Label(
+            blind_zone_y_scale_frame,
+            text=f"{self.skeleton_blind_zone_y.get()*100:.1f}%",
+            width=6
+        )
+        self.blind_zone_y_label.pack(side='left', padx=5)
+        
+        # Информационная подсказка
+        info_label = ttk.Label(
+            blind_zones_frame,
+            text="Скелет скрывается, если человек выходит за пределы центральной зоны",
+            font=('Arial', 8),
+            foreground='gray'
+        )
+        info_label.pack(pady=(5, 0))
+    
     def _create_output_section(self, parent):
         """Секция выходных потоков"""
         output_frame = ttk.LabelFrame(parent, text="📤 Выходные потоки", padding=10)
@@ -732,8 +802,12 @@ class AppGUI:
         control_frame = ttk.Frame(parent)
         control_frame.pack(fill='x', pady=10)
         
+        # Основные кнопки управления
+        main_buttons_frame = ttk.Frame(control_frame)
+        main_buttons_frame.pack(fill='x', pady=(0, 5))
+        
         self.start_btn = ttk.Button(
-            control_frame, 
+            main_buttons_frame, 
             text="▶️ Запуск", 
             command=self.start, 
             width=12
@@ -741,7 +815,7 @@ class AppGUI:
         self.start_btn.pack(side='left', padx=2)
         
         self.stop_btn = ttk.Button(
-            control_frame, 
+            main_buttons_frame, 
             text="⏹️ Остановка", 
             command=self.stop, 
             state="disabled", 
@@ -750,10 +824,28 @@ class AppGUI:
         self.stop_btn.pack(side='left', padx=2)
         
         ttk.Button(
-            control_frame, 
+            main_buttons_frame, 
             text="❌ Выход", 
             command=self.quit, 
             width=12
+        ).pack(side='left', padx=2)
+        
+        # Кнопки сохранения/загрузки настроек
+        settings_buttons_frame = ttk.Frame(control_frame)
+        settings_buttons_frame.pack(fill='x')
+        
+        ttk.Button(
+            settings_buttons_frame,
+            text="💾 Сохранить настройки",
+            command=self.save_settings,
+            width=18
+        ).pack(side='left', padx=2)
+        
+        ttk.Button(
+            settings_buttons_frame,
+            text="📂 Загрузить настройки",
+            command=self.load_settings,
+            width=18
         ).pack(side='left', padx=2)
         
     def _create_status_section(self, parent):
@@ -963,6 +1055,241 @@ class AppGUI:
             import config
             rgb = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
             config.BARBELL_DASH_COLOR = (rgb[2], rgb[1], rgb[0])  # RGB -> BGR
+    
+    def on_blind_zone_x_change(self, value):
+        """Обработчик изменения слепой зоны по X"""
+        val = float(value)
+        self.blind_zone_x_label.config(text=f"{val*100:.1f}%")
+    
+    def on_blind_zone_y_change(self, value):
+        """Обработчик изменения слепой зоны по Y"""
+        val = float(value)
+        self.blind_zone_y_label.config(text=f"{val*100:.1f}%")
+    
+    def get_blind_zones(self):
+        """Получение значений слепых зон"""
+        return {
+            'blind_zone_x': self.skeleton_blind_zone_x.get(),
+            'blind_zone_y': self.skeleton_blind_zone_y.get()
+        }
+    
+    def save_settings(self, filepath=None):
+        """Сохранение текущих настроек в файл"""
+        
+        if filepath is None:
+            filepath = filedialog.asksaveasfilename(
+                title="Сохранить настройки",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if not filepath:
+                return False
+        
+        try:
+            settings = {
+                # Режим работы
+                'mode': self.mode.get(),
+                'enable_pose': self.enable_pose.get(),
+                'enable_barbell': self.enable_barbell.get(),
+                
+                # Источник видео
+                'source': self.source_var.get(),
+                
+                # Внешний вид
+                'show_joints': self.show_joints.get(),
+                'bone_color': self.bone_color.get(),
+                'joint_color': self.joint_color.get(),
+                'bone_width': self.bone_width.get(),
+                'joint_radius': self.joint_radius.get(),
+                'font_size': self.font_size.get(),
+                'font_thickness': self.font_thickness.get(),
+                
+                # Параметры визуализации пути штанги
+                'barbell_path_offset_x': self.barbell_path_offset_x.get(),
+                'barbell_path_opacity': self.barbell_path_opacity.get(),
+                'barbell_path_color': self.barbell_path_color.get(),
+                'barbell_dash_length': self.barbell_dash_length.get(),
+                'barbell_dash_gap': self.barbell_dash_gap.get(),
+                'barbell_dash_thickness': self.barbell_dash_thickness.get(),
+                'barbell_dash_opacity': self.barbell_dash_opacity.get(),
+                'barbell_dash_color': self.barbell_dash_color.get(),
+                
+                # Модель
+                'model_complexity': self.model_complexity.get(),
+                'smooth_landmarks': self.smooth_landmarks.get(),
+                'min_det': self.min_det.get(),
+                'min_track': self.min_track.get(),
+                
+                # Выходные потоки
+                'use_ndi': self.use_ndi.get(),
+                'use_virtual': self.use_virtual.get(),
+                'ndi_name': self.ndi_name.get(),
+                
+                # Слепые зоны скелета
+                'skeleton_blind_zone_x': self.skeleton_blind_zone_x.get(),
+                'skeleton_blind_zone_y': self.skeleton_blind_zone_y.get(),
+                
+                # Параметры обработки
+                'proc_w': self.proc_w,
+                'proc_h': self.proc_h,
+                'every_n': self.every_n,
+                'target_fps': self.target_fps
+            }
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            
+            messagebox.showinfo("Успех", f"Настройки сохранены в:\n{filepath}")
+            return True
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить настройки:\n{e}")
+            return False
+    
+    def load_settings(self, filepath=None):
+        """Загрузка настроек из файла"""
+        
+        if filepath is None:
+            filepath = filedialog.askopenfilename(
+                title="Загрузить настройки",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if not filepath:
+                return False
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            
+            # Загружаем настройки
+            if 'mode' in settings:
+                self.mode.set(settings.get('mode', 'both'))
+            if 'enable_pose' in settings:
+                self.enable_pose.set(settings.get('enable_pose', True))
+            if 'enable_barbell' in settings:
+                self.enable_barbell.set(settings.get('enable_barbell', True))
+            
+            if 'source' in settings:
+                self.source_var.set(settings['source'])
+            
+            if 'show_joints' in settings:
+                self.show_joints.set(settings.get('show_joints', True))
+            if 'bone_color' in settings:
+                self.bone_color.set(settings['bone_color'])
+                self.bone_color_preview.config(bg=settings['bone_color'])
+            if 'joint_color' in settings:
+                self.joint_color.set(settings['joint_color'])
+                self.joint_color_preview.config(bg=settings['joint_color'])
+            if 'bone_width' in settings:
+                self.bone_width.set(settings['bone_width'])
+                self.bone_width_label.config(text=str(settings['bone_width']))
+            if 'joint_radius' in settings:
+                self.joint_radius.set(settings['joint_radius'])
+                self.joint_radius_label.config(text=str(settings['joint_radius']))
+            if 'font_size' in settings:
+                self.font_size.set(settings['font_size'])
+                self.font_size_label.config(text=f"{settings['font_size']:.1f}")
+            if 'font_thickness' in settings:
+                self.font_thickness.set(settings['font_thickness'])
+                self.font_thickness_label.config(text=str(settings['font_thickness']))
+            
+            # Параметры визуализации пути штанги
+            if 'barbell_path_offset_x' in settings:
+                self.barbell_path_offset_x.set(settings['barbell_path_offset_x'])
+                self.barbell_path_offset_label.config(text=str(settings['barbell_path_offset_x']))
+            if 'barbell_path_opacity' in settings:
+                self.barbell_path_opacity.set(settings['barbell_path_opacity'])
+                self.barbell_path_opacity_label.config(text=f"{settings['barbell_path_opacity']:.2f}")
+            if 'barbell_path_color' in settings:
+                self.barbell_path_color.set(settings['barbell_path_color'])
+                self.barbell_path_color_preview.config(bg=settings['barbell_path_color'])
+            if 'barbell_dash_length' in settings:
+                self.barbell_dash_length.set(settings['barbell_dash_length'])
+                self.barbell_dash_length_label.config(text=str(settings['barbell_dash_length']))
+            if 'barbell_dash_gap' in settings:
+                self.barbell_dash_gap.set(settings['barbell_dash_gap'])
+                self.barbell_dash_gap_label.config(text=str(settings['barbell_dash_gap']))
+            if 'barbell_dash_thickness' in settings:
+                self.barbell_dash_thickness.set(settings['barbell_dash_thickness'])
+                self.barbell_dash_thickness_label.config(text=str(settings['barbell_dash_thickness']))
+            if 'barbell_dash_opacity' in settings:
+                self.barbell_dash_opacity.set(settings['barbell_dash_opacity'])
+                self.barbell_dash_opacity_label.config(text=f"{settings['barbell_dash_opacity']:.2f}")
+            if 'barbell_dash_color' in settings:
+                self.barbell_dash_color.set(settings['barbell_dash_color'])
+                self.barbell_dash_color_preview.config(bg=settings['barbell_dash_color'])
+            
+            # Модель
+            if 'model_complexity' in settings:
+                self.model_complexity.set(settings.get('model_complexity', 1))
+            if 'smooth_landmarks' in settings:
+                self.smooth_landmarks.set(settings.get('smooth_landmarks', True))
+            if 'min_det' in settings:
+                self.min_det.set(settings.get('min_det', 0.4))
+            if 'min_track' in settings:
+                self.min_track.set(settings.get('min_track', 0.4))
+            
+            # Выходные потоки
+            if 'use_ndi' in settings:
+                self.use_ndi.set(settings.get('use_ndi', False))
+            if 'use_virtual' in settings:
+                self.use_virtual.set(settings.get('use_virtual', False))
+            if 'ndi_name' in settings:
+                self.ndi_name.set(settings.get('ndi_name', 'Stream_NDI'))
+            
+            # Слепые зоны скелета
+            if 'skeleton_blind_zone_x' in settings:
+                self.skeleton_blind_zone_x.set(settings['skeleton_blind_zone_x'])
+                self.blind_zone_x_label.config(text=f"{settings['skeleton_blind_zone_x']*100:.1f}%")
+            if 'skeleton_blind_zone_y' in settings:
+                self.skeleton_blind_zone_y.set(settings['skeleton_blind_zone_y'])
+                self.blind_zone_y_label.config(text=f"{settings['skeleton_blind_zone_y']*100:.1f}%")
+            
+            # Параметры обработки
+            if 'proc_w' in settings:
+                self.proc_w = settings['proc_w']
+                self.proc_entry.delete(0, "end")
+                self.proc_entry.insert(0, f"{self.proc_w}x{self.proc_h}")
+            if 'proc_h' in settings:
+                self.proc_h = settings['proc_h']
+                self.proc_entry.delete(0, "end")
+                self.proc_entry.insert(0, f"{self.proc_w}x{self.proc_h}")
+            if 'every_n' in settings:
+                self.every_n = settings['every_n']
+                self.every_spin.delete(0, "end")
+                self.every_spin.insert(0, str(self.every_n))
+            if 'target_fps' in settings:
+                self.target_fps = settings['target_fps']
+                self.fps_spin.delete(0, "end")
+                self.fps_spin.insert(0, str(self.target_fps))
+            
+            # Обновляем config для параметров штанги
+            import config
+            if 'barbell_path_offset_x' in settings:
+                config.BARBELL_PATH_OFFSET_X = settings['barbell_path_offset_x']
+            if 'barbell_path_opacity' in settings:
+                config.BARBELL_PATH_OPACITY = settings['barbell_path_opacity']
+            if 'barbell_path_color' in settings:
+                color = settings['barbell_path_color']
+                rgb = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+                config.BARBELL_PATH_COLOR = (rgb[2], rgb[1], rgb[0])
+            if 'barbell_dash_length' in settings:
+                config.BARBELL_DASH_LENGTH = settings['barbell_dash_length']
+            if 'barbell_dash_gap' in settings:
+                config.BARBELL_DASH_GAP = settings['barbell_dash_gap']
+            if 'barbell_dash_thickness' in settings:
+                config.BARBELL_DASH_THICKNESS = settings['barbell_dash_thickness']
+            if 'barbell_dash_opacity' in settings:
+                config.BARBELL_DASH_OPACITY = settings['barbell_dash_opacity']
+            if 'barbell_dash_color' in settings:
+                color = settings['barbell_dash_color']
+                rgb = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+                config.BARBELL_DASH_COLOR = (rgb[2], rgb[1], rgb[0])
+            
+            messagebox.showinfo("Успех", f"Настройки загружены из:\n{filepath}")
+            return True
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить настройки:\n{e}")
+            return False
         
     def browse_file(self):
         """Выбор видео файла"""
