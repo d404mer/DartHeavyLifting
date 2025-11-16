@@ -1167,7 +1167,7 @@ class UnifiedTrackingApp:
                                 pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
                                 cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
                     
-                    # Рисуем пунктирную линию от первой точки пути
+                    # Рисуем пунктирную линию от первой точки пути gfgf
                     if len(path) > 0:
                         h, w = display_frame.shape[:2]
                         first_point_x = int((path[0][0] + path_offset_x) * scale + offset_x)  # X координата первой точки (масштабированная со смещением)
