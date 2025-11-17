@@ -670,7 +670,7 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     # Параметры статичной подложки
     panel_width = 500
     panel_height = 800
-    panel_x = 1200  # правая часть экрана
+    panel_x = 1140  # правая часть экрана
     panel_y = (h - panel_height) // 2  # по центру по вертикали
     panel_color = (220, 220, 220)  # белый цвет
     alpha = 0.3  # 30% прозрачность
