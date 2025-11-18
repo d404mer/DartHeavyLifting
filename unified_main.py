@@ -1,6 +1,6 @@
 """
 Объединенная версия: GUI + трекинг позы + трекинг штанги
-Объединяет функциональность main_pose_tracker.py и main.py
+С GUI вынесенным в отдельный файл
 """
 
 import os
@@ -14,16 +14,22 @@ import time
 import socket
 import json
 import gc
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from tkinter.colorchooser import askcolor
 from typing import Optional, Tuple, List
 from collections import deque
+from urllib.parse import parse_qs, unquote
+from PIL import ImageFont, ImageDraw, Image
+
 
 # Импорты из проекта
 import config
 from pose_tracker import PoseTracker
 from visualizer import Visualizer
+
+# Импортируем только GUI из отдельного файла
+from gui import AppGUI
 
 # Попытка NDI
 try:
@@ -44,16 +50,9 @@ except Exception:
 import mediapipe as mp
 mp_pose = mp.solutions.pose
 
-# UDP
-try:
-    UE_IP, UE_PORT = config.UDP_HOST, config.UDP_PORT
-except:
-    UE_IP, UE_PORT = "127.0.0.1", 5005
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
 # -------------------- Утилиты --------------------
 def list_cameras(max_test=6):
-    """Список доступных камер"""
+    """Список доступных камер через OpenCV"""
     cams = []
     for i in range(max_test):
         cap = cv2.VideoCapture(i, cv2.CAP_DSHOW if os.name == "nt" else 0)
@@ -269,7 +268,7 @@ class OptimizedBarbellTracker:
 # -------------------- Потоки обработки --------------------
 class CaptureThread(threading.Thread):
     """Поток захвата видео"""
-    def __init__(self, source, out_q, stop_event, target_fps=30):
+    def __init__(self, source, out_q, stop_event, target_fps=50):
         super().__init__(daemon=True)
         self.source = source
         self.out_q = out_q
@@ -277,10 +276,27 @@ class CaptureThread(threading.Thread):
         self.target_fps = target_fps
         self.cap = None
         self.is_video_file = False
-        self.video_fps = 30.0
+        self.video_fps = 50.0
+        self.use_ffmpeg = False
+        self.ffmpeg_process = None
+        self.ffmpeg_width = getattr(config, "VIDEO_WIDTH", 1920)
+        self.ffmpeg_height = getattr(config, "VIDEO_HEIGHT", 1080)
+        self.ffmpeg_pixel_format = getattr(config, "DECKLINK_DEFAULT_PIXEL_FORMAT", "bgr24")
+        self.ffmpeg_frame_size = self.ffmpeg_width * self.ffmpeg_height * 3
+        self.ffmpeg_stderr_thread = None
         self.open_source(source)
     
     def open_source(self, source):
+        # Захват через ffmpeg (DeckLink)
+        if isinstance(source, str) and source.lower().startswith("decklink:"):
+            try:
+                self._start_decklink_capture(source)
+            except Exception as e:
+                self.use_ffmpeg = False
+                print(f"❌ Не удалось запустить ffmpeg для источника '{source}': {e}")
+            return
+        
+        # Обычный видеофайл
         if isinstance(source, str) and source.lower().endswith((".mp4", ".mov", ".avi")):
             self.cap = cv2.VideoCapture(source)
             self.is_video_file = True
@@ -291,53 +307,252 @@ class CaptureThread(threading.Thread):
             else:
                 self.video_fps = self.target_fps
             print(f"📹 Видео файл открыт, FPS: {self.video_fps:.2f}")
-        else:
-            try:
-                idx = int(source)
-                self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
-                self.is_video_file = False
-            except:
-                self.cap = cv2.VideoCapture(source)
-                self.is_video_file = False
-        if not self.cap.isOpened():
+            return
+        
+        # Попытка открыть числовой индекс (DirectShow/Media Foundation)
+        try:
+            idx = int(source)
+            self.is_video_file = False
+            
+            # Получаем параметры из config
+            target_width = getattr(config, "VIDEO_WIDTH", 1920)
+            target_height = getattr(config, "VIDEO_HEIGHT", 1080)
+            target_fps = getattr(config, "TARGET_FPS", 50)
+            
+            # Пробуем DirectShow сначала
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == "nt" else 0)
+            
+            if self.cap.isOpened():
+                # Пробуем установить параметры
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
+                self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+                
+                # Пропускаем несколько кадров для стабилизации
+                for _ in range(5):
+                    ret, _ = self.cap.read()
+                    if not ret:
+                        break
+                
+                # Проверяем реальные параметры
+                actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                
+                print(f"✅ Камера {idx} открыта через DirectShow")
+                print(f"   Разрешение: {actual_width}x{actual_height}, FPS: {actual_fps:.2f}")
+            else:
+                # Если DirectShow не сработал, пробуем Media Foundation
+                try:
+                    self.cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+                    if self.cap.isOpened():
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
+                        self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+                        
+                        for _ in range(5):
+                            ret, _ = self.cap.read()
+                            if not ret:
+                                break
+                        
+                        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                        
+                        print(f"✅ Камера {idx} открыта через Media Foundation")
+                        print(f"   Разрешение: {actual_width}x{actual_height}, FPS: {actual_fps:.2f}")
+                except Exception as e:
+                    print(f"⚠️ Media Foundation не сработал: {e}")
+        except Exception:
+            self.cap = cv2.VideoCapture(source)
+            self.is_video_file = False
+        
+        if not self.use_ffmpeg and (self.cap is None or not self.cap.isOpened()):
             print("❌ Cannot open source:", source)
     
+    def _start_decklink_capture(self, source: str):
+        """Инициализация захвата через ffmpeg с backend DeckLink"""
+        self.use_ffmpeg = True
+        self.is_video_file = False
+        
+        spec = source[len("decklink:"):]
+        if "?" in spec:
+            device_part, query_part = spec.split("?", 1)
+            params = parse_qs(query_part, keep_blank_values=True)
+        else:
+            device_part = spec
+            params = {}
+        
+        device_name = unquote(device_part).strip()
+        if not device_name:
+            device_name = getattr(config, "DECKLINK_DEFAULT_DEVICE", None)
+        if not device_name:
+            device_name = "0"
+        
+        # Параметры потока
+        self.ffmpeg_width = int(params.get("width", [getattr(config, "VIDEO_WIDTH", 1920)])[0])
+        self.ffmpeg_height = int(params.get("height", [getattr(config, "VIDEO_HEIGHT", 1080)])[0])
+        fps_param = params.get("fps") or params.get("framerate")
+        ffmpeg_fps = None
+        if fps_param:
+            try:
+                ffmpeg_fps = float(fps_param[0])
+            except (ValueError, TypeError):
+                ffmpeg_fps = None
+        format_code = params.get("format_code", [getattr(config, "DECKLINK_DEFAULT_FORMAT_CODE", None)])[0]
+        
+        pixel_format = params.get("pix_fmt", [getattr(config, "DECKLINK_DEFAULT_PIXEL_FORMAT", "bgr24")])[0]
+        pixel_format = (pixel_format or "bgr24").lower()
+        if pixel_format != "bgr24":
+            print(f"⚠️ Поддерживается только вывод bgr24. Запрошен '{pixel_format}', использую 'bgr24'.")
+            pixel_format = "bgr24"
+        self.ffmpeg_pixel_format = pixel_format
+        self.ffmpeg_frame_size = self.ffmpeg_width * self.ffmpeg_height * 3
+        
+        ffmpeg_path = getattr(config, "FFMPEG_PATH", "ffmpeg")
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostdin",
+            "-thread_queue_size", "2048",
+            "-f", "decklink",
+        ]
+        if format_code:
+            cmd.extend(["-format_code", format_code])
+        if ffmpeg_fps:
+            cmd.extend(["-framerate", str(ffmpeg_fps)])
+        cmd.extend(["-i", device_name])
+        cmd.extend([
+            "-pix_fmt", pixel_format,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-"
+        ])
+        
+        try:
+            self.ffmpeg_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"FFmpeg не найден по пути '{ffmpeg_path}'. Установите сборку с поддержкой DeckLink.")
+        except Exception as exc:
+            raise RuntimeError(f"Ошибка запуска FFmpeg: {exc}")
+        
+        self.ffmpeg_stderr_thread = threading.Thread(target=self._consume_ffmpeg_stderr, daemon=True)
+        self.ffmpeg_stderr_thread.start()
+        fps_info = ffmpeg_fps if ffmpeg_fps else getattr(config, "TARGET_FPS", 30)
+        print(f"🎥 FFmpeg DeckLink: '{device_name}' -> {self.ffmpeg_width}x{self.ffmpeg_height}@{fps_info}fps")
+    
+    def _consume_ffmpeg_stderr(self):
+        """Вывод предупреждений ffmpeg, чтобы не переполнялся буфер stderr"""
+        if not self.ffmpeg_process or self.ffmpeg_process.stderr is None:
+            return
+        try:
+            for raw_line in self.ffmpeg_process.stderr:
+                if not raw_line:
+                    break
+                try:
+                    line = raw_line.decode("utf-8", "ignore").strip()
+                except Exception:
+                    line = str(raw_line).strip()
+                if line:
+                    print(f"[ffmpeg] {line}")
+        except Exception:
+            pass
+    
+    def _cleanup_capture(self):
+        """Освобождение ресурсов захвата"""
+        if self.use_ffmpeg:
+            if self.ffmpeg_process:
+                try:
+                    if self.ffmpeg_process.stdout:
+                        self.ffmpeg_process.stdout.close()
+                    if self.ffmpeg_process.stderr:
+                        self.ffmpeg_process.stderr.close()
+                except Exception:
+                    pass
+                try:
+                    self.ffmpeg_process.terminate()
+                    self.ffmpeg_process.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        self.ffmpeg_process.kill()
+                    except Exception:
+                        pass
+            self.ffmpeg_process = None
+        else:
+            try:
+                if self.cap:
+                    self.cap.release()
+            except Exception:
+                pass
+        self.cap = None
     def run(self):
-        frame_time = 1.0 / self.video_fps if self.is_video_file else 1.0 / self.target_fps
+        frame_time = 1.0 / self.video_fps if self.is_video_file else 1.0 / max(self.target_fps, 1)
         last_frame_time = time.time()
         
-        while not self.stop_event.is_set():
-            if self.cap is None or not self.cap.isOpened():
-                time.sleep(0.05)
-                continue
-            
-            # Контроль скорости для видео файлов
-            if self.is_video_file:
-                elapsed = time.time() - last_frame_time
-                if elapsed < frame_time:
-                    time.sleep(frame_time - elapsed)
-                last_frame_time = time.time()
-            
-            ret, frame = self.cap.read()
-            if not ret:
-                if self.is_video_file:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    last_frame_time = time.time()
-                    continue
-                time.sleep(0.02)
-                continue
-            try:
-                self.out_q.put(frame, block=False)
-            except queue.Full:
-                try:
-                    _ = self.out_q.get_nowait()
-                    self.out_q.put(frame, block=False)
-                except:
-                    pass
         try:
-            self.cap.release()
-        except:
-            pass
+            while not self.stop_event.is_set():
+                if self.use_ffmpeg:
+                    if not self.ffmpeg_process or self.ffmpeg_process.stdout is None:
+                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                            print("❌ FFmpeg DeckLink: процесс завершился")
+                            break
+                        time.sleep(0.05)
+                        continue
+                    
+                    data = self.ffmpeg_process.stdout.read(self.ffmpeg_frame_size)
+                    if not data or len(data) < self.ffmpeg_frame_size:
+                        if self.stop_event.is_set():
+                            break
+                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                            print("❌ FFmpeg DeckLink: поток остановлен")
+                            break
+                        time.sleep(0.01)
+                        continue
+                    
+                    frame = np.frombuffer(data, dtype=np.uint8)
+                    try:
+                        frame = frame.reshape((self.ffmpeg_height, self.ffmpeg_width, 3))
+                    except ValueError:
+                        # Непредвиденный размер кадра
+                        print("⚠️ FFmpeg DeckLink: Размер кадра не совпадает с ожидаемым")
+                        time.sleep(0.01)
+                        continue
+                else:
+                    if self.cap is None or not self.cap.isOpened():
+                        time.sleep(0.05)
+                        continue
+                    
+                    if self.is_video_file:
+                        elapsed = time.time() - last_frame_time
+                        if elapsed < frame_time:
+                            time.sleep(frame_time - elapsed)
+                        last_frame_time = time.time()
+                    
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        if self.is_video_file:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            last_frame_time = time.time()
+                            continue
+                        time.sleep(0.02)
+                        continue
+                
+                try:
+                    self.out_q.put(frame, block=False)
+                except queue.Full:
+                    try:
+                        _ = self.out_q.get_nowait()
+                        self.out_q.put(frame, block=False)
+                    except Exception:
+                        pass
+        finally:
+            self._cleanup_capture()
 
 class ProcThread(threading.Thread):
     """Поток обработки (MediaPipe + трекинг штанги)"""
@@ -399,12 +614,74 @@ class ProcThread(threading.Thread):
                     pass
 
 # -------------------- Отрисовка скелета --------------------
-def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius):
-    """Рисует скелет с углами"""
+# Кэш для шрифтов (чтобы не загружать каждый раз)
+_font_cache = {}
+
+def _get_font(size):
+    """Получить шрифт из кэша"""
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.truetype("arial.ttf", size)
+        except:
+            _font_cache[size] = ImageFont.load_default()
+    return _font_cache[size]
+
+def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, joint_radius, font_size=0.7, font_thickness=1, blind_zone_x=0.2, blind_zone_y=0.2):
+    """Рисует скелет с углами, скрывает когда человек выходит из центра"""
     if landmarks is None:
         return frame
+    
     h, w = frame.shape[:2]
+    
+    # Проверяем, находится ли человек в центре экрана (в активной зоне)
+    person_in_center = False
+    try:
+        # Используем координаты головы и ног для определения положения человека по высоте
+        head = landmarks[0]  # Голова - самая верхняя точка
+        left_foot = landmarks[27]  # Левая ступня
+        right_foot = landmarks[28]  # Правая ступня
+
+        # Центр по X - голова, по Y - середина между головой и ступнями
+        person_center_x = head.x
+        person_center_y = (head.y + (left_foot.y + right_foot.y) / 2) / 2
+        
+        # Определяем центральную зону (используем параметры из GUI)
+        center_left = blind_zone_x
+        center_right = 1 - blind_zone_x
+        center_top = blind_zone_y
+        center_bottom = 1 - blind_zone_y
+        
+        # Проверяем, находится ли человек в центральной зоне (не в слепой зоне)
+        if (center_left <= person_center_x <= center_right and 
+            center_top <= person_center_y <= center_bottom):
+            person_in_center = True
+            
+    except (IndexError, AttributeError):
+        # Если не можем определить положение, считаем что человек не в центре
+        person_in_center = False
+    
+    # Если человек в слепой зоне, не отображаем графику (плашку и скелет)
+    if not person_in_center:
+        return frame
+    
+    # Копируем кадр для модификации
     overlay = frame.copy()
+    
+    # Параметры статичной подложки
+    panel_width = 500
+    panel_height = 800
+    panel_x = 1220  # правая часть экрана
+    panel_y = (h - panel_height) // 2  # по центру по вертикали
+    panel_color = (220, 220, 220)  # белый цвет
+    alpha = 0.3  # 30% прозрачность
+
+    # Рисуем полупрозрачную плашку (только если человек в активной зоне)
+    panel_overlay = overlay.copy()
+    cv2.rectangle(panel_overlay, (panel_x, panel_y), 
+                  (panel_x + panel_width, panel_y + panel_height), 
+                  panel_color, -1)
+    # Накладываем с прозрачностью
+    overlay = cv2.addWeighted(panel_overlay, alpha, overlay, 1 - alpha, 0)
     
     limbs = {
         "left_arm": (11, 13, 15),
@@ -416,379 +693,318 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     bone_bgr = tuple(int(bone_color[i:i+2], 16) for i in (5, 3, 1))
     joint_bgr = tuple(int(joint_color[i:i+2], 16) for i in (5, 3, 1))
     
+    # Собираем все тексты для отрисовки за один раз (оптимизация PIL)
+    text_data = []
+    
+    # Отрисовываем скелет в координатах (+650). лучше 670
     for limb, (a, b, c) in limbs.items():
         try:
-            pa = (int(landmarks[a].x * w), int(landmarks[a].y * h))
-            pb = (int(landmarks[b].x * w), int(landmarks[b].y * h))
-            pc = (int(landmarks[c].x * w), int(landmarks[c].y * h))
-        except:
+            pa = (int(landmarks[a].x * w + 760), int(landmarks[a].y * h))
+            pb = (int(landmarks[b].x * w + 760), int(landmarks[b].y * h))
+            pc = (int(landmarks[c].x * w + 760), int(landmarks[c].y * h))
+        except (IndexError, AttributeError):
             continue
         
+        # Рисуем обводку костей
         outline_width = bone_width + 2
         cv2.line(overlay, pa, pb, (0, 0, 0), outline_width, cv2.LINE_AA)
         cv2.line(overlay, pb, pc, (0, 0, 0), outline_width, cv2.LINE_AA)
+        
+        # Рисуем основные кости
         cv2.line(overlay, pa, pb, bone_bgr, bone_width, cv2.LINE_AA)
         cv2.line(overlay, pb, pc, bone_bgr, bone_width, cv2.LINE_AA)
         
         angle_val = angles.get(limb, 0.0)
-        cv2.putText(overlay, f"{angle_val:.0f}°", (pb[0] + 10, pb[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(overlay, f"{angle_val:.0f}°", (pb[0] + 10, pb[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, bone_bgr, 1, cv2.LINE_AA)
         
+        # Используем настройки шрифта из GUI
+        outline_thickness = max(2, font_thickness)
+        
+        # Определяем, левая это часть или правая
+        is_left_side = limb.startswith("left")
+        
+        # Позиционирование текста: левая часть - слева от сустава, правая - справа
+        offset_x = -240 if is_left_side else 160
+        text_x = pb[0] + offset_x
+        text_y = pb[1] - 10
+        
+        # Сохраняем данные для текста (отрисуем все за раз)
+        text_data.append((text_x, text_y, f"{angle_val:.0f}°", outline_thickness))
+        
+        # Рисуем суставы
         for idx in [a, b, c]:
-            x, y = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
-            cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
-            cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
+            try:
+                x, y = int(landmarks[idx].x * w + 760), int(landmarks[idx].y * h)
+                cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
+                cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
+            except (IndexError, AttributeError):
+                continue
     
-    return cv2.addWeighted(overlay, 0.9, frame, 0.1, 0)
-
-# -------------------- GUI --------------------
-class App:
-    def __init__(self, root):
-        self.root = root
-        root.title("Unified Pose & Barbell Tracking")
-        root.configure(bg='#2b2b2b')
+    # Отрисовываем весь текст за один раз (минимизируем PIL конвертации)
+    if text_data:
+        font_size_int = int(font_size * 50)
+        font = _get_font(font_size_int)
+        # Конвертируем в PIL только один раз
+        image_pil = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(image_pil)
+        
+        for text_x, text_y, text, outline_thickness in text_data:
+            # Рисуем обводку текста
+            if outline_thickness > 1:
+                for dx in [-outline_thickness, 0, outline_thickness]:
+                    for dy in [-outline_thickness, 0, outline_thickness]:
+                        if dx != 0 or dy != 0:
+                            draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0))
+            # Рисуем основной текст
+            draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
+        
+        # Конвертируем обратно один раз
+        overlay = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+    
+    return overlay
+# -------------------- Основной класс приложения --------------------
+class UnifiedTrackingApp:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Unified Pose & Barbell Tracking")
+        # Размеры окна
+        window_width = 1200
+        window_height = 1100
+        
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        
+        # Устанавливаем геометрию с позиционированием
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        
+        # Получаем список камер
+        self.camera_list = list_cameras()
+    
+        
+        # Создаем GUI
+        self.gui = AppGUI(self.root, self.camera_list)
+        
+        # Устанавливаем callbacks
+        self.gui.set_start_callback(self.start_processing)
+        self.gui.set_stop_callback(self.stop_processing)
+        self.gui.set_quit_callback(self.quit_app)
+        self.gui.set_refresh_cameras_callback(self.refresh_cameras)
+        
+        # Состояние приложения
         self.running = False
         self.stop_event = threading.Event()
         
-        # Стили
-        self.style = ttk.Style()
-        self.style.configure('TFrame', background='#2b2b2b')
-        self.style.configure('TLabel', background='#2b2b2b', foreground='white')
-        self.style.configure('TLabelframe', background='#2b2b2b', foreground='white')
-        self.style.configure('TLabelframe.Label', background='#2b2b2b', foreground='white')
-        self.style.configure('TButton', background='#404040', foreground='white')
-        self.style.configure('TCheckbutton', background='#2b2b2b', foreground='white')
-        self.style.configure('TCombobox', background='#404040', foreground='white')
-        self.style.configure('TEntry', background='#404040', foreground='white')
-        self.style.configure('TScale', background='#2b2b2b')
-        self.style.configure('TRadiobutton', background='#2b2b2b', foreground='white')
-        
-        # Параметры
-        self.WINDOW_W = 1920
-        self.WINDOW_H = 1080
-        self.proc_w = 320
-        self.proc_h = 180
-        self.every_n = 2
-        self.target_fps = 30
-        
-        # Режим работы: "pose", "barbell", "both"
-        self.mode = tk.StringVar(value="both")
-        self.enable_pose = tk.BooleanVar(value=True)
-        self.enable_barbell = tk.BooleanVar(value=True)
-        
-        # GUI элементы
-        self.ndi_name = tk.StringVar(value="UnifiedStream_NDI")
-        self.use_ndi = tk.BooleanVar(value=False and NDI_AVAILABLE)
-        self.use_virtual = tk.BooleanVar(value=False and VIRTUALCAM_AVAILABLE)
-        self.show_joints = tk.BooleanVar(value=True)
-        self.model_complexity = tk.IntVar(value=1)
-        self.smooth_landmarks = tk.BooleanVar(value=True)
-        self.min_det = tk.DoubleVar(value=0.4)
-        self.min_track = tk.DoubleVar(value=0.4)
-        self.bone_color = tk.StringVar(value="#FF6B35")
-        self.joint_color = tk.StringVar(value="#4ECDC4")
-        self.bone_width = tk.IntVar(value=6)
-        self.joint_radius = tk.IntVar(value=6)
-        
-        # Основной layout
-        main_frame = ttk.Frame(root)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        left_frame = ttk.Frame(main_frame, width=400)
-        left_frame.pack(side='left', fill='y', padx=(0, 10))
-        left_frame.pack_propagate(False)
-        
-        right_frame = ttk.Frame(main_frame)
-        right_frame.pack(side='right', fill='both', expand=True)
-        
-        # Предпросмотр
-        preview_header = ttk.Label(right_frame, text="Предпросмотр", font=('Arial', 12, 'bold'))
-        preview_header.pack(pady=(0, 5))
-        preview_container = ttk.Frame(right_frame)
-        preview_container.pack(fill='both', expand=True)
-        self.preview_label = ttk.Label(preview_container, text="Запустите стрим для предпросмотра",
-                                      background='black', foreground='white', font=('Arial', 10), anchor='center')
-        self.preview_label.pack(fill='both', expand=True)
-        
-        # === РЕЖИМ РАБОТЫ ===
-        mode_frame = ttk.LabelFrame(left_frame, text="🎯 Режим работы", padding=10)
-        mode_frame.pack(fill='x', pady=(0, 10))
-        ttk.Radiobutton(mode_frame, text="Только поза", variable=self.mode, value="pose",
-                       command=self.on_mode_change).pack(anchor='w', pady=2)
-        ttk.Radiobutton(mode_frame, text="Только штанга", variable=self.mode, value="barbell",
-                       command=self.on_mode_change).pack(anchor='w', pady=2)
-        ttk.Radiobutton(mode_frame, text="Поза + штанга", variable=self.mode, value="both",
-                       command=self.on_mode_change).pack(anchor='w', pady=2)
-        
-        # === ИСТОЧНИК ВИДЕО ===
-        source_frame = ttk.LabelFrame(left_frame, text="📷 Источник видео", padding=10)
-        source_frame.pack(fill='x', pady=(0, 10))
-        
-        source_row1 = ttk.Frame(source_frame)
-        source_row1.pack(fill='x', pady=2)
-        ttk.Label(source_row1, text="Камера:").pack(side='left')
-        self.cam_list = list_cameras(6)
-        self.source_var = tk.StringVar(value=str(self.cam_list[0]) if self.cam_list else "0")
-        self.source_combo = ttk.Combobox(source_row1, values=[str(x) for x in self.cam_list],
-                                       textvariable=self.source_var, width=12)
-        self.source_combo.pack(side='left', padx=5)
-        
-        source_row2 = ttk.Frame(source_frame)
-        source_row2.pack(fill='x', pady=2)
-        ttk.Button(source_row2, text="📁 Выбрать видео", command=self.browse_file).pack(side='left', padx=2)
-        ttk.Button(source_row2, text="🔄 Обновить камеры", command=self.refresh_cams).pack(side='left', padx=2)
-        
-        # Поле для отображения выбранного файла
-        source_row3 = ttk.Frame(source_frame)
-        source_row3.pack(fill='x', pady=2)
-        ttk.Label(source_row3, text="Файл:").pack(side='left')
-        self.file_label = ttk.Label(source_row3, text="(не выбран)", foreground='gray', font=('Arial', 8))
-        self.file_label.pack(side='left', padx=5)
-        
-        # === НАСТРОЙКИ ОБРАБОТКИ ===
-        processing_frame = ttk.LabelFrame(left_frame, text="⚙️ Настройки обработки", padding=10)
-        processing_frame.pack(fill='x', pady=(0, 10))
-        proc_row1 = ttk.Frame(processing_frame)
-        proc_row1.pack(fill='x', pady=2)
-        ttk.Label(proc_row1, text="Разрешение:").pack(side='left')
-        self.proc_entry = ttk.Entry(proc_row1, width=10)
-        self.proc_entry.insert(0, f"{self.proc_w}x{self.proc_h}")
-        self.proc_entry.pack(side='left', padx=5)
-        ttk.Label(proc_row1, text="Кадры:").pack(side='left', padx=(10,0))
-        self.every_spin = ttk.Spinbox(proc_row1, from_=1, to=6, width=4)
-        self.every_spin.delete(0, "end")
-        self.every_spin.insert(0, str(self.every_n))
-        self.every_spin.pack(side='left', padx=5)
-        proc_row2 = ttk.Frame(processing_frame)
-        proc_row2.pack(fill='x', pady=2)
-        ttk.Label(proc_row2, text="FPS:").pack(side='left')
-        self.fps_spin = ttk.Spinbox(proc_row2, from_=5, to=60, width=4)
-        self.fps_spin.delete(0, "end")
-        self.fps_spin.insert(0, str(self.target_fps))
-        self.fps_spin.pack(side='left', padx=5)
-        
-        # === ВНЕШНИЙ ВИД ===
-        appearance_frame = ttk.LabelFrame(left_frame, text="🎨 Внешний вид", padding=10)
-        appearance_frame.pack(fill='x', pady=(0, 10))
-        colors_frame = ttk.Frame(appearance_frame)
-        colors_frame.pack(fill='x', pady=5)
-        ttk.Label(colors_frame, text="Цвет костей:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
-        self.bone_color_btn = ttk.Button(colors_frame, text="Выбрать", command=self.choose_bone_color, width=8)
-        self.bone_color_btn.grid(row=0, column=1, padx=5, pady=3)
-        self.bone_color_preview = tk.Canvas(colors_frame, width=40, height=20, bg=self.bone_color.get(), relief='solid', bd=1)
-        self.bone_color_preview.grid(row=0, column=2, padx=5, pady=3)
-        ttk.Label(colors_frame, text="Цвет суставов:").grid(row=1, column=0, sticky="w", padx=5, pady=3)
-        self.joint_color_btn = ttk.Button(colors_frame, text="Выбрать", command=self.choose_joint_color, width=8)
-        self.joint_color_btn.grid(row=1, column=1, padx=5, pady=3)
-        self.joint_color_preview = tk.Canvas(colors_frame, width=40, height=20, bg=self.joint_color.get(), relief='solid', bd=1)
-        self.joint_color_preview.grid(row=1, column=2, padx=5, pady=3)
-        sizes_frame = ttk.Frame(appearance_frame)
-        sizes_frame.pack(fill='x', pady=5)
-        ttk.Label(sizes_frame, text="Толщина костей:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
-        bone_scale_frame = ttk.Frame(sizes_frame)
-        bone_scale_frame.grid(row=0, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
-        ttk.Scale(bone_scale_frame, from_=1, to=20, orient='horizontal', variable=self.bone_width,
-                 command=self.on_bone_width_change, length=120).pack(side='left')
-        self.bone_width_label = ttk.Label(bone_scale_frame, text=str(self.bone_width.get()), width=3)
-        self.bone_width_label.pack(side='left', padx=5)
-        ttk.Label(sizes_frame, text="Размер суставов:").grid(row=1, column=0, sticky="w", padx=5, pady=3)
-        joint_scale_frame = ttk.Frame(sizes_frame)
-        joint_scale_frame.grid(row=1, column=1, columnspan=2, sticky='ew', padx=5, pady=3)
-        ttk.Scale(joint_scale_frame, from_=1, to=20, orient='horizontal', variable=self.joint_radius,
-                 command=self.on_joint_radius_change, length=120).pack(side='left')
-        self.joint_radius_label = ttk.Label(joint_scale_frame, text=str(self.joint_radius.get()), width=3)
-        self.joint_radius_label.pack(side='left', padx=5)
-        
-        # === МОДЕЛЬ ===
-        model_frame = ttk.LabelFrame(left_frame, text="🧠 Настройки модели", padding=10)
-        model_frame.pack(fill='x', pady=(0, 10))
-        model_row1 = ttk.Frame(model_frame)
-        model_row1.pack(fill='x', pady=2)
-        ttk.Label(model_row1, text="Сложность:").pack(side='left')
-        ttk.Spinbox(model_row1, from_=0, to=1, width=5, textvariable=self.model_complexity).pack(side='left', padx=5)
-        ttk.Checkbutton(model_row1, text="Сглаживание", variable=self.smooth_landmarks).pack(side='left', padx=10)
-        model_row2 = ttk.Frame(model_frame)
-        model_row2.pack(fill='x', pady=2)
-        ttk.Label(model_row2, text="Детекция:").pack(side='left')
-        ttk.Entry(model_row2, textvariable=self.min_det, width=6).pack(side='left', padx=5)
-        ttk.Label(model_row2, text="Трекинг:").pack(side='left', padx=(10,0))
-        ttk.Entry(model_row2, textvariable=self.min_track, width=6).pack(side='left', padx=5)
-        
-        # === ВЫХОДНЫЕ ПОТОКИ ===
-        output_frame = ttk.LabelFrame(left_frame, text="📤 Выходные потоки", padding=10)
-        output_frame.pack(fill='x', pady=(0, 10))
-        ttk.Checkbutton(output_frame, text="Показывать скелет", variable=self.show_joints).pack(anchor='w', pady=2)
-        ttk.Checkbutton(output_frame, text="Использовать NDI", variable=self.use_ndi).pack(anchor='w', pady=2)
-        ttk.Checkbutton(output_frame, text="Виртуальная камера", variable=self.use_virtual).pack(anchor='w', pady=2)
-        ndi_frame = ttk.Frame(output_frame)
-        ndi_frame.pack(fill='x', pady=2)
-        ttk.Label(ndi_frame, text="Имя NDI:").pack(side='left')
-        ttk.Entry(ndi_frame, textvariable=self.ndi_name, width=15).pack(side='left', padx=5)
-        
-        # === УПРАВЛЕНИЕ ===
-        control_frame = ttk.Frame(left_frame)
-        control_frame.pack(fill='x', pady=10)
-        self.start_btn = ttk.Button(control_frame, text="▶️ Запуск", command=self.start, width=12)
-        self.start_btn.pack(side='left', padx=2)
-        self.stop_btn = ttk.Button(control_frame, text="⏹️ Остановка", command=self.stop, state="disabled", width=12)
-        self.stop_btn.pack(side='left', padx=2)
-        ttk.Button(control_frame, text="❌ Выход", command=self.quit, width=12).pack(side='left', padx=2)
-        
-        # === СТАТУС ===
-        status_frame = ttk.Frame(left_frame)
-        status_frame.pack(fill='x', pady=5)
-        self.status_var = tk.StringVar(value="Готов к работе")
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, relief="sunken",
-                               anchor="center", background='#404040', foreground='white')
-        status_label.pack(fill='x')
-        
-        # Внутренние переменные
+        # Потоки и очереди
         self.cap_thread = None
         self.proc_thread = None
+        self.render_thread = None
         self.proc_q = None
         self.render_q = None
-        self.ndi_sender = None
-        self.virtual_cam = None
+        
+        # Трекеры
         self.pose_tracker = None
         self.barbell_tracker = None
         self.visualizer = None
+        
+        # Дополнительные выходы
+        self.ndi_sender = None
+        self.virtual_cam = None
+        
+        # Параметры окна
+        self.WINDOW_W = 1920
+        self.WINDOW_H = 1080
+        
+        # Угловой буфер для сглаживания
         self.angle_buffer = {k: [] for k in ["left_arm","right_arm","left_leg","right_leg"]}
-        self.frame_counter = 0
+        
+        # Кэш для PNG изображений (загружаем один раз)
+        self._cached_logos = {}
+        self._load_cached_logos()
+        
+        # Throttling для GUI обновления (максимум 30 FPS для предпросмотра)
+        self._last_preview_update = 0.0
+        self._preview_update_interval = 1.0 / 30.0  # 30 FPS для GUI
+        
+        # UDP
+        try:
+            self.ue_ip, self.ue_port = config.UDP_HOST, config.UDP_PORT
+        except:
+            self.ue_ip, self.ue_port = "127.0.0.1", 5005
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        # Обработка закрытия окна
+        self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
     
-    def on_mode_change(self):
-        """Обновление режима работы"""
-        mode = self.mode.get()
-        self.enable_pose.set(mode == "pose" or mode == "both")
-        self.enable_barbell.set(mode == "barbell" or mode == "both")
-    
-    def choose_bone_color(self):
-        color = askcolor(initialcolor=self.bone_color.get(), title="Выберите цвет костей")[1]
-        if color:
-            self.bone_color.set(color)
-            self.bone_color_preview.config(bg=color)
-    
-    def choose_joint_color(self):
-        color = askcolor(initialcolor=self.joint_color.get(), title="Выберите цвет суставов")[1]
-        if color:
-            self.joint_color.set(color)
-            self.joint_color_preview.config(bg=color)
-    
-    def on_bone_width_change(self, value):
-        self.bone_width_label.config(text=str(int(float(value))))
-    
-    def on_joint_radius_change(self, value):
-        self.joint_radius_label.config(text=str(int(float(value))))
-    
-    def browse_file(self):
-        path = filedialog.askopenfilename(
-            title="Выберите видео файл",
-            filetypes=[
-                ("Video files", "*.mp4 *.mov *.avi *.MP4 *.MOV *.AVI"),
-                ("MP4 files", "*.mp4 *.MP4"),
-                ("MOV files", "*.mov *.MOV"),
-                ("AVI files", "*.avi *.AVI"),
-                ("All files", "*.*")
-            ],
-            initialdir="vids" if os.path.exists("vids") else "."
-        )
-        if path:
-            self.source_var.set(path)
-            # Показываем имя файла (только имя, не полный путь)
-            filename = os.path.basename(path)
-            if len(filename) > 30:
-                filename = "..." + filename[-27:]
-            self.file_label.config(text=filename, foreground='white')
-            # Обновляем список в ComboBox, чтобы путь к файлу был доступен
-            current_values = list(self.source_combo['values'])
-            if path not in current_values:
-                self.source_combo['values'] = current_values + [path]
-    
-    def refresh_cams(self):
-        cams = list_cameras(8)
-        # Сохраняем текущее значение (может быть путь к файлу)
-        current_value = self.source_var.get()
-        # Обновляем список камер
-        cam_values = [str(x) for x in cams]
-        # Если текущее значение - это путь к файлу, добавляем его в список
-        if current_value and (current_value.lower().endswith((".mp4", ".mov", ".avi")) or os.path.exists(current_value)):
-            if current_value not in cam_values:
-                cam_values.append(current_value)
-        self.source_combo['values'] = cam_values
-        # Если текущее значение - это камера, обновляем список, иначе оставляем как есть
-        if current_value and current_value.isdigit() and int(current_value) in cams:
-            pass  # Оставляем текущую камеру
-        elif cams and not (current_value and os.path.exists(current_value)):
-            self.source_var.set(str(cams[0]))
-    
-    def start(self):
+    def _load_cached_logos(self):
+        """Загрузка PNG изображений в кэш (один раз при инициализации)"""
+        try:
+            # Загружаем "суставы.png" если существует
+            if os.path.exists("суставы.png"):
+                self._cached_logos["pose"] = Image.open("суставы.png")
+                print("✅ Загружен кэш: суставы.png")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить суставы.png: {e}")
+            self._cached_logos["pose"] = None
+        
+        try:
+            # Загружаем "траектория_штанги.png" если существует
+            if os.path.exists("траектория_штанги.png"):
+                self._cached_logos["barbell"] = Image.open("траектория_штанги.png")
+                print("✅ Загружен кэш: траектория_штанги.png")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить траектория_штанги.png: {e}")
+            self._cached_logos["barbell"] = None
+        
+    def refresh_cameras(self):
+        """Обновление списка камер"""
+        self.camera_list = list_cameras()
+        self.gui.update_camera_list(self.camera_list)
+        
+    def start_processing(self):
+        """Запуск обработки видео"""
         if self.running:
             return
-        self.on_mode_change()
-        src = self.source_var.get()
-        proc_res = self.proc_entry.get().strip()
+            
         try:
-            pw, ph = [int(x) for x in proc_res.split("x")]
-        except Exception:
-            messagebox.showerror("Error", "Разрешение должно быть в формате 320x180")
+            # Получаем параметры из GUI
+            source = self.gui.get_source()
+            proc_w, proc_h, every_n, target_fps = self.gui.get_processing_params()
+            
+        except ValueError as e:
+            messagebox.showerror("Ошибка", str(e))
             return
-        self.proc_w, self.proc_h = pw, ph
-        try:
-            self.every_n = max(1, int(self.every_spin.get()))
-        except:
-            self.every_n = 2
-        try:
-            self.target_fps = int(self.fps_spin.get())
-        except:
-            self.target_fps = 30
-        
+            
         # Инициализация трекеров
-        self.status_var.set("Инициализация...")
-        if self.enable_pose.get():
-            self.pose_tracker = PoseTracker(
-                min_detection_confidence=self.min_det.get(),
-                min_tracking_confidence=self.min_track.get()
-            )
-        if self.enable_barbell.get():
-            self.barbell_tracker = OptimizedBarbellTracker(smoothing_factor=config.BARBELL_SMOOTHING_FACTOR)
-        # Visualizer нужен для отрисовки пути штанги
-        if self.enable_barbell.get() or self.enable_pose.get():
-            self.visualizer = Visualizer(pose_tracker=self.pose_tracker if self.enable_pose.get() else None)
+        self.gui.update_status("Инициализация...")
         
-        # Очереди и потоки
+        # Трекер позы
+        if self.gui.enable_pose.get():
+            self.pose_tracker = PoseTracker(
+                min_detection_confidence=self.gui.min_det.get(),
+                min_tracking_confidence=self.gui.min_track.get()
+            )
+            
+        # Трекер штанги
+        if self.gui.enable_barbell.get():
+            self.barbell_tracker = OptimizedBarbellTracker(smoothing_factor=config.BARBELL_SMOOTHING_FACTOR)
+            
+        # Визуализатор
+        if self.gui.enable_barbell.get() or self.gui.enable_pose.get():
+            self.visualizer = Visualizer(pose_tracker=self.pose_tracker if self.gui.enable_pose.get() else None)
+            
+        # Инициализация очередей и потоков
         self.proc_q = queue.Queue(maxsize=2)
         self.render_q = queue.Queue(maxsize=2)
-        self.stop_event = threading.Event()
+        self.stop_event.clear()
         
-        self.cap_thread = CaptureThread(src, self.proc_q, self.stop_event, self.target_fps)
-        self.proc_thread = ProcThread(self.proc_q, self.render_q, self.stop_event, self.proc_w, self.proc_h,
-                                     self.every_n, self.pose_tracker, self.barbell_tracker, self.enable_barbell.get())
+        # Поток захвата
+        self.cap_thread = CaptureThread(source, self.proc_q, self.stop_event, target_fps)
+        
+        # Поток обработки
+        self.proc_thread = ProcThread(
+            self.proc_q, self.render_q, self.stop_event, proc_w, proc_h, every_n,
+            self.pose_tracker, self.barbell_tracker, self.gui.enable_barbell.get()
+        )
+        
+        # Запускаем потоки
         self.cap_thread.start()
         self.proc_thread.start()
         
-        # NDI и виртуальная камера
-        if self.use_ndi.get() and NDI_AVAILABLE:
+        # Инициализация дополнительных выходов
+        self._initialize_outputs()
+        
+        # Обновляем состояние
+        self.running = True
+        self.gui.set_running_state(True)
+        self.gui.update_status("Стриминг активен")
+        
+        # Запускаем поток рендеринга
+        self.render_thread = threading.Thread(target=self._render_loop, daemon=True)
+        self.render_thread.start()
+        
+        # Показываем горячие клавиши
+        self._show_hotkeys()
+        
+    def stop_processing(self):
+        """Остановка обработки видео"""
+        if not self.running:
+            return
+            
+        self.stop_event.set()
+        
+        # Останавливаем потоки
+        if self.cap_thread:
+            self.cap_thread.join(timeout=1.0)
+        if self.proc_thread:
+            self.proc_thread.join(timeout=1.0)
+            
+        # Закрываем дополнительные выходы
+        self._cleanup_outputs()
+        
+        # Освобождаем ресурсы трекеров
+        if self.pose_tracker:
+            self.pose_tracker.release()
+            
+        # Обновляем состояние
+        self.running = False
+        self.gui.set_running_state(False)
+        self.gui.update_status("Стриминг остановлен")
+        
+        # Очищаем предпросмотр
+        self.gui.preview_label.configure(
+            text="Запустите стрим для предпросмотра",
+            image=''
+        )
+        
+        gc.collect()
+        
+    def _initialize_outputs(self):
+        """Инициализация дополнительных выходов (NDI, VirtualCam)"""
+        # NDI
+        if self.gui.use_ndi.get() and NDI_AVAILABLE:
             try:
                 if ndi.initialize():
                     sc = ndi.SendCreate()
-                    sc.ndi_name = self.ndi_name.get()
+                    sc.ndi_name = self.gui.ndi_name.get()
                     self.ndi_sender = ndi.send_create(sc)
             except Exception as e:
                 messagebox.showwarning("NDI", f"NDI init error: {e}")
-        if self.use_virtual.get() and VIRTUALCAM_AVAILABLE:
+                
+        # Virtual Camera
+        if self.gui.use_virtual.get() and VIRTUALCAM_AVAILABLE:
             try:
-                self.virtual_cam = pyvirtualcam.Camera(width=self.WINDOW_W, height=self.WINDOW_H,
-                                                      fps=self.target_fps, fmt=PixelFormat.BGR)
+                self.virtual_cam = pyvirtualcam.Camera(
+                    width=self.WINDOW_W, 
+                    height=self.WINDOW_H,
+                    fps=50,
+                    fmt=PixelFormat.BGR
+                )
             except Exception as e:
                 messagebox.showwarning("VirtualCam", f"Error: {e}")
-        
-        self.running = True
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
-        self.status_var.set("Стриминг активен")
-        
-        # Выводим информацию о горячих клавишах
+                
+    def _cleanup_outputs(self):
+        """Очистка дополнительных выходов"""
+        # NDI
+        try:
+            if self.ndi_sender:
+                ndi.send_destroy(self.ndi_sender)
+                ndi.destroy()
+                self.ndi_sender = None
+        except:
+            pass
+            
+        # Virtual Camera
+        try:
+            if self.virtual_cam:
+                self.virtual_cam.close()
+                self.virtual_cam = None
+        except:
+            pass
+            
+    def _show_hotkeys(self):
+        """Показ информации о горячих клавишах"""
         print("\n" + "="*50)
         print("🎮 ГОРЯЧИЕ КЛАВИШИ (в окне OpenCV):")
         print("  'q' или ESC - остановка")
@@ -797,55 +1013,8 @@ class App:
         print("  '2' - переключить трекинг штанги")
         print("="*50 + "\n")
         
-        self.render_thread = threading.Thread(target=self.render_loop, daemon=True)
-        self.render_thread.start()
-    
-    def stop(self):
-        if not self.running:
-            return
-        self.stop_event.set()
-        try:
-            if self.cap_thread: self.cap_thread.join(timeout=1.0)
-            if self.proc_thread: self.proc_thread.join(timeout=1.0)
-        except:
-            pass
-        try:
-            if self.ndi_sender:
-                ndi.send_destroy(self.ndi_sender)
-                ndi.destroy()
-        except:
-            pass
-        try:
-            if self.virtual_cam:
-                self.virtual_cam.close()
-        except:
-            pass
-        if self.pose_tracker:
-            self.pose_tracker.release()
-        self.running = False
-        self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        self.status_var.set("Стриминг остановлен")
-        gc.collect()
-    
-    def quit(self):
-        if self.running:
-            if not messagebox.askyesno("Quit", "Остановить стриминг и выйти?"):
-                return
-            self.stop()
-        self.root.quit()
-    
-    def update_preview(self, frame):
-        try:
-            preview_frame = cv2.resize(frame, (640, 360))
-            preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
-            img = tk.PhotoImage(data=cv2.imencode('.png', preview_frame)[1].tobytes())
-            self.preview_label.configure(image=img)
-            self.preview_label.image = img
-        except Exception as e:
-            print(f"Preview update error: {e}")
-    
-    def render_loop(self):
+    def _render_loop(self):
+        """Основной цикл рендеринга"""
         last_frame = np.zeros((self.WINDOW_H, self.WINDOW_W, 3), dtype=np.uint8)
         last_pose_data = None
         last_barbell_pos = None
@@ -855,15 +1024,28 @@ class App:
         
         while not self.stop_event.is_set():
             frame_counter += 1
+            
             try:
+                # Получаем данные из очереди
                 frame, pose_data, barbell_pos, timestamp = self.render_q.get(timeout=0.05)
                 last_frame = frame.copy()
                 last_pose_data = pose_data
                 last_barbell_pos = barbell_pos
             except queue.Empty:
+                # Используем последние данные если очередь пуста
                 frame, pose_data, barbell_pos, timestamp = last_frame, last_pose_data, last_barbell_pos, time.time()
             
-            disp = frame.copy()
+            # Копируем кадр только если будем его модифицировать
+            needs_modification = (self.gui.enable_pose.get() and pose_data and pose_data.get('all_landmarks') and self.gui.show_joints.get()) or \
+                                (self.gui.enable_barbell.get() and self.barbell_tracker) or \
+                                (self._cached_logos.get("pose") is not None) or \
+                                (self._cached_logos.get("barbell") is not None)
+            
+            if needs_modification:
+                display_frame = frame.copy()
+            else:
+                display_frame = frame
+            
             angles = {}
             left_knee_coords = None
             right_knee_coords = None
@@ -872,7 +1054,7 @@ class App:
             joints_data = {}
             
             # Обработка позы
-            if self.enable_pose.get() and pose_data and pose_data.get('all_landmarks'):
+            if self.gui.enable_pose.get() and pose_data and pose_data.get('all_landmarks'):
                 lm = pose_data['all_landmarks']
                 h, w = frame.shape[:2]
                 
@@ -895,9 +1077,20 @@ class App:
                     angles[k] = sum(buf)/len(buf) if buf else v
                 
                 # Отрисовка скелета
-                if self.show_joints.get():
-                    disp = draw_overlay(disp, lm, angles, self.bone_color.get(), self.joint_color.get(),
-                                      self.bone_width.get(), self.joint_radius.get())
+                if self.gui.show_joints.get():
+                    font_settings = self.gui.get_font_settings()
+                    blind_zones = self.gui.get_blind_zones()
+                    display_frame = draw_overlay(
+                        display_frame, lm, angles, 
+                        self.gui.bone_color.get(), 
+                        self.gui.joint_color.get(),
+                        self.gui.bone_width.get(), 
+                        self.gui.joint_radius.get(),
+                        font_size=font_settings['font_size'],
+                        font_thickness=font_settings['font_thickness'],
+                        blind_zone_x=blind_zones['blind_zone_x'],
+                        blind_zone_y=blind_zones['blind_zone_y']
+                    )
                 
                 # Данные для UDP
                 if pose_data.get('all_landmarks'):
@@ -909,18 +1102,10 @@ class App:
                     left_knee_angle = joints.get('left_knee_angle')
                     right_knee_angle = joints.get('right_knee_angle')
             
-            # Визуализация пути штанги (через Visualizer)
-            if self.enable_barbell.get() and self.barbell_tracker and self.visualizer:
-                disp = self.visualizer.draw_frame(disp, pose_data if self.enable_pose.get() else None,
-                                                 barbell_pos, self.barbell_tracker.get_path())
-            elif self.enable_barbell.get() and self.barbell_tracker:
-                # Если visualizer не создан, рисуем путь вручную
-                path = self.barbell_tracker.get_path()
-                if len(path) >= 2:
-                    for i in range(1, len(path)):
-                        pt1 = (int(path[i-1][0]), int(path[i-1][1]))
-                        pt2 = (int(path[i][0]), int(path[i][1]))
-                        cv2.line(disp, pt1, pt2, config.COLOR_BARBELL_PATH, config.LINE_THICKNESS)
+            # Визуализация пути штанги будет выполнена после изменения размера кадра
+            # (чтобы координаты пути соответствовали масштабированному кадру)
+            
+            # Изображение будет добавлено после изменения размера кадра
             
             # Отправка UDP данных
             udp_data = {
@@ -944,24 +1129,210 @@ class App:
                 "angles": {k: round(v,2) for k,v in angles.items()} if angles else {}
             }
             try:
-                sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (UE_IP, UE_PORT))
+                self.sock.sendto(json.dumps(udp_data, ensure_ascii=False).encode('utf-8'), (self.ue_ip, self.ue_port))
             except:
                 pass
             
             # Изменение размера
-            if disp.shape[1] != self.WINDOW_W or disp.shape[0] != self.WINDOW_H:
-                disp = resize_with_aspect(disp, self.WINDOW_W, self.WINDOW_H)
+            original_h, original_w = display_frame.shape[:2]
+            if original_w != self.WINDOW_W or original_h != self.WINDOW_H:
+                # Вычисляем масштаб и смещение для масштабирования координат пути
+                scale = min(self.WINDOW_W / original_w, self.WINDOW_H / original_h)
+                new_w = int(original_w * scale)
+                new_h = int(original_h * scale)
+                offset_x = (self.WINDOW_W - new_w) // 2
+                offset_y = (self.WINDOW_H - new_h) // 2
+                
+                # Масштабируем кадр
+                display_frame = resize_with_aspect(display_frame, self.WINDOW_W, self.WINDOW_H)
+                
+                # Рисуем путь штанги на масштабированном кадре с правильными координатами
+                if self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
+                    if len(path) >= 2:
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int((path[i-1][0] + path_offset_x) * scale + offset_x), int(path[i-1][1] * scale + offset_y))
+                                pt2 = (int((path[i][0] + path_offset_x) * scale + offset_x), int(path[i][1] * scale + offset_y))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int((path[0][0] + path_offset_x) * scale + offset_x)  # X координата первой точки (масштабированная со смещением)
+                        first_point_y = int(path[0][1] * scale + offset_y)  # Y координата первой точки (масштабированная)
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            # Масштабируем длину и промежуток пунктира для масштабированного кадра
+                            dash_length = int(config.BARBELL_DASH_LENGTH * scale)
+                            gap_length = int(config.BARBELL_DASH_GAP * scale)
+                            current_y = first_point_y
+                            line_thickness = max(1, int(config.BARBELL_DASH_THICKNESS * scale))
+                            
+                            # Создаем overlay для полупрозрачного пунктира
+                            overlay = display_frame.copy()
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
+                            
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
+                            
+                            # Накладываем полупрозрачный overlay на кадр
+                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
+            else:
+                # Если размер не изменяется, рисуем путь напрямую
+                if self.gui.enable_barbell.get() and self.barbell_tracker and self.visualizer:
+                    display_frame = self.visualizer.draw_frame(
+                        display_frame, 
+                        pose_data if self.gui.enable_pose.get() else None,
+                        barbell_pos, 
+                        self.barbell_tracker.get_path()
+                    )
+                elif self.gui.enable_barbell.get() and self.barbell_tracker:
+                    path = self.barbell_tracker.get_path()
+                    path_offset_x = config.BARBELL_PATH_OFFSET_X
+                    if len(path) >= 2:
+                        path_color = config.BARBELL_PATH_COLOR
+                        path_opacity = config.BARBELL_PATH_OPACITY
+                        # Рисуем путь с учетом прозрачности
+                        if path_opacity < 1.0:
+                            path_overlay = display_frame.copy()
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(path_overlay, pt1, pt2, path_color, config.LINE_THICKNESS)
+                            cv2.addWeighted(path_overlay, path_opacity, display_frame, 1 - path_opacity, 0, display_frame)
+                        else:
+                            for i in range(1, len(path)):
+                                pt1 = (int(path[i-1][0] + path_offset_x), int(path[i-1][1]))
+                                pt2 = (int(path[i][0] + path_offset_x), int(path[i][1]))
+                                cv2.line(display_frame, pt1, pt2, path_color, config.LINE_THICKNESS)
+                    
+                    # Рисуем пунктирную линию от первой точки пути
+                    if len(path) > 0:
+                        h, w = display_frame.shape[:2]
+                        first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
+                        first_point_y = int(path[0][1])  # Y координата первой точки
+                        if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                            line_x = first_point_x  # Позиция линии по X координате первой точки
+                            dash_length = config.BARBELL_DASH_LENGTH
+                            gap_length = config.BARBELL_DASH_GAP
+                            current_y = first_point_y
+                            line_thickness = config.BARBELL_DASH_THICKNESS
+                            
+                            # Создаем overlay для полупрозрачного пунктира
+                            overlay = display_frame.copy()
+                            dash_color = config.BARBELL_DASH_COLOR
+                            alpha = config.BARBELL_DASH_OPACITY
+                            
+                            while current_y > 0:
+                                end_y = max(0, current_y - dash_length)
+                                if end_y < current_y:
+                                    cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
+                                            dash_color, line_thickness)
+                                current_y = end_y - gap_length
+                                if current_y <= 0:
+                                    break
+                            
+                            # Накладываем полупрозрачный overlay на кадр
+                            cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
             
-            # Обновление предпросмотра
-            self.root.after(0, self.update_preview, disp.copy())
+            # Обновление предпросмотра (с throttling - максимум 30 FPS)
+            now = time.time()
+            if now - self._last_preview_update >= self._preview_update_interval:
+                self.root.after(0, self.gui.update_preview, display_frame.copy())
+                self._last_preview_update = now
+            
+            # Накладываем PNG изображения из кэша (оптимизировано)
+            frame_height, frame_width = display_frame.shape[:2]
+            needs_pil_conversion = False
+            
+            # Накладываем "суставы.png" если включен трекинг позы
+            if self.gui.enable_pose.get() and self._cached_logos.get("pose") is not None:
+                try:
+                    logo_img = self._cached_logos["pose"]
+                    # Масштабируем только если размер изменился (кэшируем результат)
+                    cache_key = f"pose_{frame_width}_{frame_height}"
+                    if not hasattr(self, '_cached_logos_resized'):
+                        self._cached_logos_resized = {}
+                    if cache_key not in self._cached_logos_resized:
+                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    needs_pil_conversion = True
+                except Exception as e:
+                    pass
+            
+            # Накладываем "траектория_штанги.png" если включен трекинг штанги
+            if self.gui.enable_barbell.get() and self._cached_logos.get("barbell") is not None:
+                try:
+                    logo_img = self._cached_logos["barbell"]
+                    # Масштабируем только если размер изменился (кэшируем результат)
+                    cache_key = f"barbell_{frame_width}_{frame_height}"
+                    if not hasattr(self, '_cached_logos_resized'):
+                        self._cached_logos_resized = {}
+                    if cache_key not in self._cached_logos_resized:
+                        self._cached_logos_resized[cache_key] = logo_img.resize((frame_width, frame_height), Image.Resampling.LANCZOS)
+                    needs_pil_conversion = True
+                except Exception as e:
+                    pass
+            
+            # Выполняем PIL конвертацию только если нужно наложить изображения
+            if needs_pil_conversion:
+                try:
+                    # Конвертируем кадр в PIL Image (один раз)
+                    frame_pil = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
+                    
+                    # Накладываем изображения из кэша
+                    if self.gui.enable_pose.get():
+                        cache_key = f"pose_{frame_width}_{frame_height}"
+                        if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
+                            logo_img = self._cached_logos_resized[cache_key]
+                            if logo_img.mode == 'RGBA':
+                                frame_pil = frame_pil.convert('RGBA')
+                                frame_pil.paste(logo_img, (0, 0), logo_img)
+                                frame_pil = frame_pil.convert('RGB')
+                            else:
+                                frame_pil.paste(logo_img, (0, 0))
+                    
+                    if self.gui.enable_barbell.get():
+                        cache_key = f"barbell_{frame_width}_{frame_height}"
+                        if hasattr(self, '_cached_logos_resized') and cache_key in self._cached_logos_resized:
+                            logo_img = self._cached_logos_resized[cache_key]
+                            if logo_img.mode == 'RGBA':
+                                frame_pil = frame_pil.convert('RGBA')
+                                frame_pil.paste(logo_img, (0, 0), logo_img)
+                                frame_pil = frame_pil.convert('RGB')
+                            else:
+                                frame_pil.paste(logo_img, (0, 0))
+                    
+                    # Конвертируем обратно в BGR для OpenCV (один раз)
+                    display_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    pass
             
             # Отображение
-            cv2.imshow("Unified Tracking (ESC to stop)", disp)
+            cv2.imshow("Unified Tracking (ESC to stop)", display_frame)
             
             # Виртуальная камера
             if self.virtual_cam:
                 try:
-                    self.virtual_cam.send(disp)
+                    self.virtual_cam.send(display_frame)
                     self.virtual_cam.sleep_until_next_frame()
                 except:
                     pass
@@ -969,10 +1340,10 @@ class App:
             # NDI
             if self.ndi_sender:
                 now = time.time()
-                if now - last_send >= 1.0 / self.target_fps:
+                if now - last_send >= 1.0 / 120:  # 30 FPS для NDI
                     try:
                         bgrx = np.zeros((self.WINDOW_H, self.WINDOW_W, 4), dtype=np.uint8)
-                        bgrx[:, :, :3] = disp
+                        bgrx[:, :, :3] = display_frame
                         vf = ndi.VideoFrameV2()
                         vf.data = bgrx
                         vf.xres = self.WINDOW_W
@@ -987,32 +1358,42 @@ class App:
             # Обработка горячих клавиш
             k = cv2.waitKey(1) & 0xFF
             if k == 27 or k == ord('q'):  # ESC или 'q' - остановка
-                self.stop()
+                self.stop_processing()
                 break
             elif k == ord('c') or k == ord('C'):  # 'c' - очистить путь штанги
                 if self.barbell_tracker:
                     self.barbell_tracker.clear_path()
                     print("Путь штанги очищен")
             elif k == ord('1'):  # '1' - переключить трекинг позы
-                self.enable_pose.set(not self.enable_pose.get())
-                print(f"Трекинг позы: {'ВКЛ' if self.enable_pose.get() else 'ВЫКЛ'}")
+                self.gui.enable_pose.set(not self.gui.enable_pose.get())
+                print(f"Трекинг позы: {'ВКЛ' if self.gui.enable_pose.get() else 'ВЫКЛ'}")
             elif k == ord('2'):  # '2' - переключить трекинг штанги
-                self.enable_barbell.set(not self.enable_barbell.get())
-                print(f"Трекинг штанги: {'ВКЛ' if self.enable_barbell.get() else 'ВЫКЛ'}")
+                self.gui.enable_barbell.set(not self.gui.enable_barbell.get())
+                print(f"Трекинг штанги: {'ВКЛ' if self.gui.enable_barbell.get() else 'ВЫКЛ'}")
         
         try:
             cv2.destroyAllWindows()
         except:
             pass
+        
+    def quit_app(self):
+        """Выход из приложения"""
+        if self.running:
+            if not messagebox.askyesno("Выход", "Остановить стриминг и выйти?"):
+                return
+            self.stop_processing()
+            
+        self.root.quit()
+        self.root.destroy()
+        
+    def run(self):
+        """Запуск приложения"""
+        self.root.mainloop()
 
-# -------------------- main --------------------
 def main():
-    root = tk.Tk()
-    root.geometry("1200x700")
-    app = App(root)
-    root.protocol("WM_DELETE_WINDOW", app.quit)
-    root.mainloop()
+    """Точка входа в приложение"""
+    app = UnifiedTrackingApp()
+    app.run()
 
 if __name__ == "__main__":
     main()
-

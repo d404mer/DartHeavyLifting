@@ -76,33 +76,98 @@ class Visualizer:
             frame: Кадр для рисования
             path: Путь штанги [(x, y, timestamp), ...]
         """
-        if len(path) < 2:
+        if len(path) < 1:
             return
         
-        xs = np.array([p[0] for p in path], dtype=np.float32)
-        ys = np.array([p[1] for p in path], dtype=np.float32)
-        
-        # Применяем сглаживание если включено
-        if config.PATH_SMOOTHING_ENABLED:
-            if config.PATH_SMOOTHING_METHOD == "savgol":
-                xs_draw, ys_draw = self._smooth_path_savgol(xs, ys)
-            elif config.PATH_SMOOTHING_METHOD == "moving_average":
-                xs_draw, ys_draw = self._smooth_path_moving_average(xs, ys)
+        # Рисуем путь только если есть минимум 2 точки
+        if len(path) >= 2:
+            xs = np.array([p[0] for p in path], dtype=np.float32)
+            ys = np.array([p[1] for p in path], dtype=np.float32)
+            
+            # Применяем сглаживание если включено
+            if config.PATH_SMOOTHING_ENABLED:
+                if config.PATH_SMOOTHING_METHOD == "savgol":
+                    xs_draw, ys_draw = self._smooth_path_savgol(xs, ys)
+                elif config.PATH_SMOOTHING_METHOD == "moving_average":
+                    xs_draw, ys_draw = self._smooth_path_moving_average(xs, ys)
+                else:
+                    xs_draw, ys_draw = xs, ys
             else:
                 xs_draw, ys_draw = xs, ys
-        else:
-            xs_draw, ys_draw = xs, ys
+            
+            # Смещаем путь вправо
+            path_offset_x = config.BARBELL_PATH_OFFSET_X
+            xs_draw = xs_draw + path_offset_x
+            
+            # Цвет пути из конфига
+            path_color = config.BARBELL_PATH_COLOR
+            path_opacity = config.BARBELL_PATH_OPACITY
+            
+            # Рисуем путь с учетом прозрачности
+            if path_opacity < 1.0:
+                # Если прозрачность меньше 100%, используем overlay
+                path_overlay = frame.copy()
+                for i in range(1, len(xs_draw)):
+                    pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+                    pt2 = (int(xs_draw[i]), int(ys_draw[i]))
+                    cv2.line(path_overlay, pt1, pt2, path_color, self.line_thickness)
+                
+                # Рисуем точки пути на overlay
+                step = max(1, len(xs_draw) // 50)
+                for i in range(0, len(xs_draw), step):
+                    cv2.circle(path_overlay, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
+                
+                # Накладываем полупрозрачный путь на кадр
+                cv2.addWeighted(path_overlay, path_opacity, frame, 1 - path_opacity, 0, frame)
+            else:
+                # Если 100% непрозрачность, рисуем напрямую
+                for i in range(1, len(xs_draw)):
+                    pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
+                    pt2 = (int(xs_draw[i]), int(ys_draw[i]))
+                    cv2.line(frame, pt1, pt2, path_color, self.line_thickness)
+                
+                # Рисуем точки пути
+                step = max(1, len(xs_draw) // 50)
+                for i in range(0, len(xs_draw), step):
+                    cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, path_color, -1)
         
-        # Рисуем линии между соседними точками пути (сглаженные)
-        for i in range(1, len(xs_draw)):
-            pt1 = (int(xs_draw[i-1]), int(ys_draw[i-1]))
-            pt2 = (int(xs_draw[i]), int(ys_draw[i]))
-            cv2.line(frame, pt1, pt2, self.color_barbell, self.line_thickness)
-        
-        # Рисуем точки пути (реже, чтобы не перегружать визуализацию)
-        step = max(1, len(xs_draw) // 50)  # Рисуем примерно каждую 50-ю точку
-        for i in range(0, len(xs_draw), step):
-            cv2.circle(frame, (int(xs_draw[i]), int(ys_draw[i])), 2, self.color_barbell, -1)
+        # Рисуем вертикальную пунктирную линию от первой точки пути
+        if len(path) > 0:
+            h, w = frame.shape[:2]
+            path_offset_x = config.BARBELL_PATH_OFFSET_X
+            first_point_x = int(path[0][0] + path_offset_x)  # X координата первой точки со смещением
+            first_point_y = int(path[0][1])  # Y координата первой точки
+            
+            # Проверяем, что координаты валидны
+            if 0 <= first_point_x < w and 0 <= first_point_y < h:
+                line_x = first_point_x  # Позиция линии по X координате первой точки
+                
+                # Рисуем пунктирную линию вверх от первой точки до верха экрана
+                dash_length = config.BARBELL_DASH_LENGTH
+                gap_length = config.BARBELL_DASH_GAP
+                current_y = first_point_y
+                
+                # Толщина пунктира из конфига
+                line_thickness = config.BARBELL_DASH_THICKNESS
+                
+                # Создаем overlay для полупрозрачного пунктира
+                overlay = frame.copy()
+                dash_color = config.BARBELL_DASH_COLOR
+                alpha = config.BARBELL_DASH_OPACITY
+                
+                while current_y > 0:
+                    # Рисуем сегмент пунктира на overlay
+                    end_y = max(0, current_y - dash_length)
+                    if end_y < current_y:  # Убеждаемся, что есть что рисовать
+                        cv2.line(overlay, (line_x, current_y), (line_x, end_y), 
+                                dash_color, line_thickness)
+                    # Переходим к следующему сегменту
+                    current_y = end_y - gap_length
+                    if current_y <= 0:
+                        break
+                
+                # Накладываем полупрозрачный overlay на кадр
+                cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
     
     def _smooth_path_savgol(self, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
