@@ -1399,6 +1399,8 @@ class AppGUI:
             # Привязываем двойной клик для Pack (загрузка настроек из JSON)
             if table_name == "Pack":
                 tree.bind("<Double-1>", lambda e: self._on_pack_double_click(e))
+                # Привязываем правый клик для контекстного меню (редактирование)
+                tree.bind("<Button-3>", lambda e: self._on_pack_right_click(e))
     
     def set_database_callback(self, callback):
         """Установка callback для получения данных из БД"""
@@ -1407,6 +1409,10 @@ class AppGUI:
     def set_database_add_callback(self, callback):
         """Установка callback для добавления данных в БД"""
         self.database_add_callback = callback
+    
+    def set_database_update_callback(self, callback):
+        """Установка callback для обновления данных в БД"""
+        self.database_update_callback = callback
     
     def set_load_settings_callback(self, callback):
         """Установка callback для загрузки настроек из JSON"""
@@ -1625,6 +1631,155 @@ class AppGUI:
                 messagebox.showerror("Ошибка", "Не удалось загрузить настройки из файла")
         else:
             messagebox.showwarning("Предупреждение", "Функция загрузки настроек не доступна")
+    
+    def _on_pack_right_click(self, event):
+        """Обработчик правого клика на строку Pack для контекстного меню"""
+        selection = self.pack_tree.selection()
+        if not selection:
+            return
+        
+        # Создаем контекстное меню
+        context_menu = tk.Menu(self.root, tearoff=0)
+        context_menu.add_command(label="Редактировать", command=lambda: self.edit_pack_dialog(selection[0]))
+        context_menu.add_separator()
+        context_menu.add_command(label="Загрузить настройки", command=lambda: self._on_pack_double_click(event))
+        
+        # Показываем меню в позиции клика
+        try:
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            context_menu.grab_release()
+    
+    def edit_pack_dialog(self, item_id):
+        """Диалоговое окно для редактирования пака"""
+        item = self.pack_tree.item(item_id)
+        values = item['values']
+        
+        if not values:
+            return
+        
+        pack_id = values[0]
+        current_name = values[1] if len(values) > 1 else ""
+        current_type = values[2] if len(values) > 2 else ""
+        current_json_path = values[3] if len(values) > 3 else ""
+        current_sport = values[4] if len(values) > 4 else ""
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Редактировать пак")
+        dialog.geometry("500x400")
+        dialog.configure(bg='#2b2b2b')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Центрируем окно
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (400 // 2)
+        dialog.geometry(f"500x400+{x}+{y}")
+        
+        main_frame = ttk.Frame(dialog, padding=20)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Название
+        ttk.Label(main_frame, text="Название пака:").pack(anchor='w', pady=5)
+        name_entry = ttk.Entry(main_frame, width=50)
+        name_entry.insert(0, current_name)
+        name_entry.pack(fill='x', pady=5)
+        
+        # Вид спорта
+        ttk.Label(main_frame, text="Вид спорта:").pack(anchor='w', pady=5)
+        sport_var = tk.StringVar()
+        sport_combo = ttk.Combobox(main_frame, textvariable=sport_var, width=47, state='readonly')
+        sports_data = self.database_callback("Sport") if hasattr(self, 'database_callback') and self.database_callback else []
+        sport_options = ["Нет"] + [f"{s['Sport_ID']}: {s['Name']}" for s in sports_data]
+        sport_combo['values'] = sport_options
+        
+        # Устанавливаем текущий вид спорта
+        if current_sport:
+            for option in sport_options:
+                if current_sport in option:
+                    sport_var.set(option)
+                    break
+        else:
+            sport_var.set("Нет")
+        
+        sport_combo.pack(fill='x', pady=5)
+        
+        # Тип актива
+        ttk.Label(main_frame, text="Тип актива:").pack(anchor='w', pady=5)
+        type_var = tk.StringVar()
+        type_combo = ttk.Combobox(main_frame, textvariable=type_var, width=47, state='readonly')
+        types_data = self.database_callback("Asser_types") if hasattr(self, 'database_callback') and self.database_callback else []
+        type_options = ["Нет"] + [f"{t['Type_ID']}: {t['Name']}" for t in types_data]
+        type_combo['values'] = type_options
+        
+        # Устанавливаем текущий тип
+        if current_type:
+            for option in type_options:
+                if current_type in option:
+                    type_var.set(option)
+                    break
+        else:
+            type_var.set("Нет")
+        
+        type_combo.pack(fill='x', pady=5)
+        
+        # Путь к JSON
+        ttk.Label(main_frame, text="Путь к JSON файлу:").pack(anchor='w', pady=5)
+        json_path_frame = ttk.Frame(main_frame)
+        json_path_frame.pack(fill='x', pady=5)
+        json_path_var = tk.StringVar()
+        json_path_var.set(current_json_path)
+        json_path_entry = ttk.Entry(json_path_frame, textvariable=json_path_var, width=35)
+        json_path_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(json_path_frame, text="Обзор", command=lambda: self._browse_json_file(json_path_var)).pack(side='right')
+        
+        def save():
+            name = name_entry.get().strip()
+            if not name:
+                messagebox.showwarning("Предупреждение", "Введите название")
+                return
+            
+            sport_selection = sport_var.get()
+            if not sport_selection or sport_selection == "Нет":
+                messagebox.showwarning("Предупреждение", "Выберите вид спорта")
+                return
+            fk_sport_id = int(sport_selection.split(':')[0])
+            
+            type_selection = type_var.get()
+            fk_type_id = 0
+            if type_selection and type_selection != "Нет":
+                fk_type_id = int(type_selection.split(':')[0])
+            
+            json_path = json_path_var.get().strip()
+            
+            if hasattr(self, 'database_update_callback') and self.database_update_callback:
+                if self.database_update_callback("Pack", pack_id=pack_id, name=name, fk_type_id=fk_type_id, 
+                                                json_file_path=json_path, fk_sport_id=fk_sport_id):
+                    messagebox.showinfo("Успех", "Пак обновлен")
+                    self.refresh_table("Pack")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("Ошибка", "Не удалось обновить пак")
+            else:
+                messagebox.showwarning("Предупреждение", "База данных не подключена")
+        
+        # Кнопки
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x', pady=(20, 0))
+        
+        ttk.Button(btn_frame, text="Отмена", command=dialog.destroy).pack(side='right', padx=5)
+        ttk.Button(btn_frame, text="Сохранить", command=save).pack(side='right', padx=5)
+    
+    def _browse_json_file(self, json_path_var):
+        """Выбор JSON файла"""
+        path = filedialog.askopenfilename(
+            title="Выберите JSON файл",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir="."
+        )
+        if path:
+            json_path_var.set(path)
     
     def browse_file(self):
         """Выбор видео файла"""

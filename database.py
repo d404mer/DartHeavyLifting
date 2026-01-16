@@ -29,7 +29,7 @@ class DatabaseManager:
         self.host = host
         self.port = port
         self.user = user
-        self.password = password
+        self.password = 123
         self.dbname = dbname
         self.target_dbname = 'DartServer'
         self.conn = None
@@ -241,64 +241,21 @@ class DatabaseManager:
                 ('Бокс')
             """)
             
-            # Вставляем тестовые данные в Asser_types
+            # Вставляем тестовые данные в Asser_types (графические типы)
             cursor.execute("""
                 INSERT INTO Asser_types (Name) VALUES
-                ('Оборудование'),
-                ('Инвентарь'),
-                ('Одежда'),
-                ('Обувь'),
-                ('Аксессуары'),
-                ('Защитное снаряжение'),
-                ('Тренажеры')
+                ('Карточки'),
+                ('Путь штанги'),
+                ('Траектория движения'),
+                ('График углов'),
+                ('Статистика'),
+                ('Визуализация скелета'),
+                ('Оверлей')
             """)
-            
-            # Получаем ID для создания связей
-            cursor.execute("SELECT Sport_ID FROM Sport ORDER BY Sport_ID")
-            sport_ids = [row[0] for row in cursor.fetchall()]
-            
-            cursor.execute("SELECT Type_ID FROM Asser_types ORDER BY Type_ID")
-            type_ids = [row[0] for row in cursor.fetchall()]
-            
-            # Вставляем тестовые данные в Pack с большим разнообразием
-            cursor.execute("""
-                INSERT INTO Pack (Name, FK_Type_ID, JsonFilePath, FK_SportID) VALUES
-                ('Футбольный мяч', %s, NULL, %s),
-                ('Баскетбольный мяч', %s, NULL, %s),
-                ('Теннисная ракетка', %s, NULL, %s),
-                ('Волейбольная сетка', %s, NULL, %s),
-                ('Хоккейная клюшка', %s, NULL, %s),
-                ('Футбольная форма', %s, NULL, %s),
-                ('Баскетбольные кроссовки', %s, NULL, %s),
-                ('Теннисная сумка', %s, NULL, %s),
-                ('Плавательные очки', %s, NULL, %s),
-                ('Легкоатлетические шиповки', %s, NULL, %s),
-                ('Боксерские перчатки', %s, NULL, %s),
-                ('Футбольные щитки', %s, NULL, %s),
-                ('Баскетбольная сетка', %s, NULL, %s),
-                ('Хоккейная маска', %s, NULL, %s),
-                ('Плавательная шапочка', %s, NULL, %s)
-            """, (
-                type_ids[1], sport_ids[0],  # Футбольный мяч
-                type_ids[1], sport_ids[1],  # Баскетбольный мяч
-                type_ids[0], sport_ids[2],  # Теннисная ракетка
-                type_ids[0], sport_ids[3],  # Волейбольная сетка
-                type_ids[0], sport_ids[4],  # Хоккейная клюшка
-                type_ids[2], sport_ids[0],  # Футбольная форма
-                type_ids[3], sport_ids[1],  # Баскетбольные кроссовки
-                type_ids[4], sport_ids[2],  # Теннисная сумка
-                type_ids[4], sport_ids[5],  # Плавательные очки
-                type_ids[3], sport_ids[6],  # Легкоатлетические шиповки
-                type_ids[5], sport_ids[7],  # Боксерские перчатки
-                type_ids[5], sport_ids[0],  # Футбольные щитки
-                type_ids[0], sport_ids[1],  # Баскетбольная сетка
-                type_ids[5], sport_ids[4],  # Хоккейная маска
-                type_ids[4], sport_ids[5]   # Плавательная шапочка
-            ))
             
             self.conn.commit()
             cursor.close()
-            logger.info("✅ Тестовые данные успешно добавлены (8 видов спорта, 7 типов активов, 15 пакетов)")
+            logger.info("✅ Тестовые данные успешно добавлены (8 видов спорта, 7 типов графических активов)")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка заполнения тестовыми данными: {e}")
@@ -432,6 +389,31 @@ class DatabaseManager:
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка добавления пакета: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+    
+    def update_pack(self, pack_id: int, name: str, fk_type_id: int, json_file_path: str, fk_sport_id: int) -> bool:
+        """Обновить существующий пакет"""
+        if not self.conn:
+            return False
+        
+        try:
+            cursor = self.conn.cursor()
+            # Если fk_type_id равен 0 или None, вставляем NULL
+            type_id_param = None if fk_type_id == 0 else fk_type_id
+            json_path_param = json_file_path if json_file_path else None
+            
+            cursor.execute(
+                "UPDATE Pack SET Name = %s, FK_Type_ID = %s, JsonFilePath = %s, FK_SportID = %s WHERE PackID = %s",
+                (name, type_id_param, json_path_param, fk_sport_id, pack_id)
+            )
+            self.conn.commit()
+            cursor.close()
+            logger.info(f"✅ Пакет с ID {pack_id} обновлен")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления пакета: {e}")
             if self.conn:
                 self.conn.rollback()
             return False

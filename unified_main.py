@@ -889,6 +889,7 @@ class UnifiedTrackingApp:
         self.gui.set_refresh_cameras_callback(self.refresh_cameras)
         self.gui.set_database_callback(self.get_database_data)
         self.gui.set_database_add_callback(self.add_database_data)
+        self.gui.set_database_update_callback(self.update_database_data)
         self.gui.set_load_settings_callback(self.load_settings_from_json)
         
         # Состояние приложения
@@ -1023,6 +1024,25 @@ class UnifiedTrackingApp:
                 return False
         except Exception as e:
             print(f"❌ Ошибка добавления данных в БД: {e}")
+            return False
+    
+    def update_database_data(self, table_name, **kwargs):
+        """Обновление данных в базе данных"""
+        if not self.db_manager:
+            return False
+        
+        try:
+            if table_name == "Pack":
+                pack_id = kwargs.get('pack_id', 0)
+                name = kwargs.get('name', '')
+                fk_type_id = kwargs.get('fk_type_id', 0)
+                json_file_path = kwargs.get('json_file_path', '')
+                fk_sport_id = kwargs.get('fk_sport_id', 0)
+                return self.db_manager.update_pack(pack_id, name, fk_type_id, json_file_path, fk_sport_id)
+            else:
+                return False
+        except Exception as e:
+            print(f"❌ Ошибка обновления данных в БД: {e}")
             return False
     
     def load_settings_from_json(self, json_path):
