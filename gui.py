@@ -17,6 +17,7 @@ class AppGUI:
         self.stop_callback: Optional[Callable] = None
         self.quit_callback: Optional[Callable] = None
         self.refresh_cameras_callback: Optional[Callable] = None
+        self.database_callback: Optional[Callable] = None
         
         self.running = False
         
@@ -121,9 +122,17 @@ class AppGUI:
         left_container.pack(side='left', fill='both', padx=(0, 10))
         left_container.pack_propagate(False)
         
-        # Создаем Canvas и Scrollbar для прокрутки
-        self.canvas = tk.Canvas(left_container, bg='#2b2b2b', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(left_container, orient="vertical", command=self.canvas.yview)
+        # Создаем Notebook (вкладки) для разделения настроек и БД
+        self.notebook = ttk.Notebook(left_container)
+        self.notebook.pack(fill='both', expand=True)
+        
+        # Вкладка "Настройки"
+        settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(settings_tab, text="⚙️ Настройки")
+        
+        # Создаем Canvas и Scrollbar для прокрутки настроек
+        self.canvas = tk.Canvas(settings_tab, bg='#2b2b2b', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(settings_tab, orient="vertical", command=self.canvas.yview)
         
         # Фрейм для содержимого с прокруткой
         self.scrollable_frame = ttk.Frame(self.canvas)
@@ -142,6 +151,11 @@ class AppGUI:
         
         # Привязываем колесо мыши к прокрутке
         self._bind_mouse_wheel()
+        
+        # Вкладка "База данных"
+        db_tab = ttk.Frame(self.notebook)
+        self.notebook.add(db_tab, text="🗄️ База данных")
+        self._create_database_section(db_tab)
         
         # Правая панель - предпросмотр
         right_frame = ttk.Frame(main_frame)
@@ -1291,6 +1305,327 @@ class AppGUI:
             messagebox.showerror("Ошибка", f"Не удалось загрузить настройки:\n{e}")
             return False
         
+    def _create_database_section(self, parent):
+        """Создание секции базы данных"""
+        # Создаем Notebook для таблиц
+        db_notebook = ttk.Notebook(parent)
+        db_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Вкладка Sport
+        sport_frame = ttk.Frame(db_notebook)
+        db_notebook.add(sport_frame, text="Sport")
+        self._create_table_view(sport_frame, "Sport")
+        
+        # Вкладка Asser_types
+        asset_types_frame = ttk.Frame(db_notebook)
+        db_notebook.add(asset_types_frame, text="Asser_types")
+        self._create_table_view(asset_types_frame, "Asser_types")
+        
+        # Вкладка Pack
+        pack_frame = ttk.Frame(db_notebook)
+        db_notebook.add(pack_frame, text="Pack")
+        self._create_table_view(pack_frame, "Pack")
+    
+    def _create_table_view(self, parent, table_name):
+        """Создание представления таблицы с прокруткой"""
+        # Фрейм для кнопки обновления
+        toolbar_frame = ttk.Frame(parent)
+        toolbar_frame.pack(fill='x', padx=5, pady=5)
+        
+        # Кнопка обновления
+        refresh_btn = ttk.Button(
+            toolbar_frame,
+            text="🔄 Обновить",
+            command=lambda: self.refresh_table(table_name)
+        )
+        refresh_btn.pack(side='left', padx=5)
+        
+        # Кнопка добавления
+        add_btn = ttk.Button(
+            toolbar_frame,
+            text="➕ Добавить",
+            command=lambda: self.add_item_dialog(table_name)
+        )
+        add_btn.pack(side='left', padx=5)
+        
+        # Фрейм для таблицы с прокруткой
+        table_frame = ttk.Frame(parent)
+        table_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Создаем Treeview с прокруткой
+        scrollbar_y = ttk.Scrollbar(table_frame, orient='vertical')
+        scrollbar_x = ttk.Scrollbar(table_frame, orient='horizontal')
+        
+        # Определяем колонки и создаем Treeview в зависимости от таблицы
+        tree = None
+        if table_name == "Sport":
+            columns = ("Sport_ID", "Name")
+            tree = ttk.Treeview(table_frame, columns=columns, show='headings', yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+            tree.heading("Sport_ID", text="Sport_ID")
+            tree.heading("Name", text="Name")
+            tree.column("Sport_ID", width=100)
+            tree.column("Name", width=250)
+            self.sport_tree = tree
+        elif table_name == "Asser_types":
+            columns = ("Type_ID", "Name")
+            tree = ttk.Treeview(table_frame, columns=columns, show='headings', yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+            tree.heading("Type_ID", text="Type_ID")
+            tree.heading("Name", text="Name")
+            tree.column("Type_ID", width=100)
+            tree.column("Name", width=250)
+            self.asset_types_tree = tree
+        elif table_name == "Pack":
+            columns = ("PackID", "Name", "TypeName", "JsonFilePath", "SportName")
+            tree = ttk.Treeview(table_frame, columns=columns, show='headings', yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+            tree.heading("PackID", text="PackID")
+            tree.heading("Name", text="Name")
+            tree.heading("TypeName", text="Type Name")
+            tree.heading("JsonFilePath", text="Json File Path")
+            tree.heading("SportName", text="Sport Name")
+            tree.column("PackID", width=80)
+            tree.column("Name", width=150)
+            tree.column("TypeName", width=120)
+            tree.column("JsonFilePath", width=100)
+            tree.column("SportName", width=120)
+            self.pack_tree = tree
+        
+        if tree:
+            scrollbar_y.config(command=tree.yview)
+            scrollbar_x.config(command=tree.xview)
+            tree.pack(side='left', fill='both', expand=True)
+            scrollbar_y.pack(side='right', fill='y')
+            scrollbar_x.pack(side='bottom', fill='x')
+            
+            # Привязываем двойной клик для Pack (загрузка настроек из JSON)
+            if table_name == "Pack":
+                tree.bind("<Double-1>", lambda e: self._on_pack_double_click(e))
+    
+    def set_database_callback(self, callback):
+        """Установка callback для получения данных из БД"""
+        self.database_callback = callback
+    
+    def set_database_add_callback(self, callback):
+        """Установка callback для добавления данных в БД"""
+        self.database_add_callback = callback
+    
+    def set_load_settings_callback(self, callback):
+        """Установка callback для загрузки настроек из JSON"""
+        self.load_settings_callback = callback
+    
+    def refresh_table(self, table_name):
+        """Обновление данных в таблице"""
+        if not hasattr(self, 'database_callback') or not self.database_callback:
+            messagebox.showwarning("Предупреждение", "База данных не подключена")
+            return
+        
+        try:
+            data = self.database_callback(table_name)
+            
+            # Очищаем текущие данные
+            if table_name == "Sport":
+                if not hasattr(self, 'sport_tree'):
+                    return
+                for item in self.sport_tree.get_children():
+                    self.sport_tree.delete(item)
+                # Заполняем новыми данными
+                for row in data:
+                    self.sport_tree.insert("", "end", values=(row['Sport_ID'], row['Name']))
+            elif table_name == "Asser_types":
+                if not hasattr(self, 'asset_types_tree'):
+                    return
+                for item in self.asset_types_tree.get_children():
+                    self.asset_types_tree.delete(item)
+                # Заполняем новыми данными
+                for row in data:
+                    self.asset_types_tree.insert("", "end", values=(row['Type_ID'], row['Name']))
+            elif table_name == "Pack":
+                if not hasattr(self, 'pack_tree'):
+                    return
+                for item in self.pack_tree.get_children():
+                    self.pack_tree.delete(item)
+                # Заполняем новыми данными
+                for row in data:
+                    self.pack_tree.insert("", "end", values=(
+                        row['PackID'],
+                        row['Name'],
+                        row.get('TypeName', ''),
+                        row.get('JsonFilePath', ''),
+                        row.get('SportName', '')
+                    ))
+        except AttributeError:
+            # Treeview еще не создан, это нормально при первой загрузке
+            pass
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось обновить таблицу: {e}")
+    
+    def add_item_dialog(self, table_name):
+        """Диалоговое окно для добавления данных в таблицу"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Добавить запись в {table_name}")
+        dialog.geometry("400x300")
+        dialog.configure(bg='#2b2b2b')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Центрируем окно
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (300 // 2)
+        dialog.geometry(f"400x300+{x}+{y}")
+        
+        main_frame = ttk.Frame(dialog, padding=20)
+        main_frame.pack(fill='both', expand=True)
+        
+        if table_name == "Sport":
+            ttk.Label(main_frame, text="Название вида спорта:").pack(anchor='w', pady=5)
+            name_entry = ttk.Entry(main_frame, width=40)
+            name_entry.pack(fill='x', pady=5)
+            
+            def save():
+                name = name_entry.get().strip()
+                if not name:
+                    messagebox.showwarning("Предупреждение", "Введите название")
+                    return
+                if hasattr(self, 'database_add_callback') and self.database_add_callback:
+                    if self.database_add_callback(table_name, name=name):
+                        messagebox.showinfo("Успех", "Запись добавлена")
+                        self.refresh_table(table_name)
+                        dialog.destroy()
+                    else:
+                        messagebox.showerror("Ошибка", "Не удалось добавить запись")
+                else:
+                    messagebox.showwarning("Предупреждение", "База данных не подключена")
+            
+        elif table_name == "Asser_types":
+            ttk.Label(main_frame, text="Название типа актива:").pack(anchor='w', pady=5)
+            name_entry = ttk.Entry(main_frame, width=40)
+            name_entry.pack(fill='x', pady=5)
+            
+            def save():
+                name = name_entry.get().strip()
+                if not name:
+                    messagebox.showwarning("Предупреждение", "Введите название")
+                    return
+                if hasattr(self, 'database_add_callback') and self.database_add_callback:
+                    if self.database_add_callback(table_name, name=name):
+                        messagebox.showinfo("Успех", "Запись добавлена")
+                        self.refresh_table(table_name)
+                        dialog.destroy()
+                    else:
+                        messagebox.showerror("Ошибка", "Не удалось добавить запись")
+                else:
+                    messagebox.showwarning("Предупреждение", "База данных не подключена")
+        
+        elif table_name == "Pack":
+            ttk.Label(main_frame, text="Название пакета:").pack(anchor='w', pady=5)
+            name_entry = ttk.Entry(main_frame, width=40)
+            name_entry.pack(fill='x', pady=5)
+            
+            # Получаем список спортов и типов
+            sports_data = self.database_callback("Sport") if hasattr(self, 'database_callback') and self.database_callback else []
+            types_data = self.database_callback("Asser_types") if hasattr(self, 'database_callback') and self.database_callback else []
+            
+            sport_var = tk.StringVar()
+            type_var = tk.StringVar()
+            json_path_var = tk.StringVar()
+            
+            ttk.Label(main_frame, text="Вид спорта:").pack(anchor='w', pady=5)
+            sport_combo = ttk.Combobox(main_frame, textvariable=sport_var, width=37, state='readonly')
+            sport_combo['values'] = [f"{s['Sport_ID']}: {s['Name']}" for s in sports_data]
+            if sports_data:
+                sport_combo.current(0)
+            sport_combo.pack(fill='x', pady=5)
+            
+            ttk.Label(main_frame, text="Тип актива (необязательно):").pack(anchor='w', pady=5)
+            type_combo = ttk.Combobox(main_frame, textvariable=type_var, width=37, state='readonly')
+            type_combo['values'] = ["Нет"] + [f"{t['Type_ID']}: {t['Name']}" for t in types_data]
+            type_combo.current(0)
+            type_combo.pack(fill='x', pady=5)
+            
+            ttk.Label(main_frame, text="Путь к JSON файлу настроек (необязательно):").pack(anchor='w', pady=5)
+            json_frame = ttk.Frame(main_frame)
+            json_frame.pack(fill='x', pady=5)
+            json_entry = ttk.Entry(json_frame, textvariable=json_path_var, width=30)
+            json_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
+            
+            def browse_json():
+                path = filedialog.askopenfilename(
+                    title="Выберите JSON файл настроек",
+                    filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+                )
+                if path:
+                    json_path_var.set(path)
+            
+            ttk.Button(json_frame, text="📁 Обзор", command=browse_json, width=10).pack(side='right')
+            
+            def save():
+                name = name_entry.get().strip()
+                if not name:
+                    messagebox.showwarning("Предупреждение", "Введите название")
+                    return
+                
+                sport_selection = sport_var.get()
+                if not sport_selection:
+                    messagebox.showwarning("Предупреждение", "Выберите вид спорта")
+                    return
+                fk_sport_id = int(sport_selection.split(':')[0])
+                
+                type_selection = type_var.get()
+                fk_type_id = 0
+                if type_selection and type_selection != "Нет":
+                    fk_type_id = int(type_selection.split(':')[0])
+                
+                json_path = json_path_var.get().strip()
+                
+                if hasattr(self, 'database_add_callback') and self.database_add_callback:
+                    if self.database_add_callback(table_name, name=name, fk_type_id=fk_type_id, 
+                                                json_file_path=json_path, fk_sport_id=fk_sport_id):
+                        messagebox.showinfo("Успех", "Запись добавлена")
+                        self.refresh_table(table_name)
+                        dialog.destroy()
+                    else:
+                        messagebox.showerror("Ошибка", "Не удалось добавить запись")
+                else:
+                    messagebox.showwarning("Предупреждение", "База данных не подключена")
+        
+        # Кнопки
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x', pady=(20, 0))
+        
+        ttk.Button(btn_frame, text="Отмена", command=dialog.destroy).pack(side='right', padx=5)
+        ttk.Button(btn_frame, text="Сохранить", command=save).pack(side='right', padx=5)
+    
+    def _on_pack_double_click(self, event):
+        """Обработчик двойного клика на строку Pack для загрузки настроек из JSON"""
+        selection = self.pack_tree.selection()
+        if not selection:
+            return
+        
+        item = self.pack_tree.item(selection[0])
+        values = item['values']
+        
+        # JsonFilePath находится в 4-м столбце (индекс 3)
+        json_path = values[3] if len(values) > 3 and values[3] else None
+        
+        if not json_path:
+            messagebox.showinfo("Информация", "Для этой записи не указан путь к JSON файлу")
+            return
+        
+        # Проверяем существование файла
+        import os
+        if not os.path.exists(json_path):
+            messagebox.showerror("Ошибка", f"Файл не найден: {json_path}")
+            return
+        
+        # Загружаем настройки из JSON
+        if hasattr(self, 'load_settings_callback') and self.load_settings_callback:
+            if self.load_settings_callback(json_path):
+                messagebox.showinfo("Успех", f"Настройки загружены из файла:\n{json_path}")
+            else:
+                messagebox.showerror("Ошибка", "Не удалось загрузить настройки из файла")
+        else:
+            messagebox.showwarning("Предупреждение", "Функция загрузки настроек не доступна")
+    
     def browse_file(self):
         """Выбор видео файла"""
         path = filedialog.askopenfilename(

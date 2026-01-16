@@ -31,6 +31,9 @@ from visualizer import Visualizer
 # Импортируем только GUI из отдельного файла
 from gui import AppGUI
 
+# Импортируем модуль работы с БД
+from database import DatabaseManager
+
 # Попытка NDI
 try:
     import NDIlib as ndi
@@ -884,6 +887,9 @@ class UnifiedTrackingApp:
         self.gui.set_stop_callback(self.stop_processing)
         self.gui.set_quit_callback(self.quit_app)
         self.gui.set_refresh_cameras_callback(self.refresh_cameras)
+        self.gui.set_database_callback(self.get_database_data)
+        self.gui.set_database_add_callback(self.add_database_data)
+        self.gui.set_load_settings_callback(self.load_settings_from_json)
         
         # Состояние приложения
         self.running = False
@@ -904,6 +910,10 @@ class UnifiedTrackingApp:
         # Дополнительные выходы
         self.ndi_sender = None
         self.virtual_cam = None
+        
+        # База данных
+        self.db_manager = None
+        self._initialize_database()
         
         # Параметры окна
         self.WINDOW_W = 1920
@@ -933,6 +943,115 @@ class UnifiedTrackingApp:
         
         # Обработка закрытия окна
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
+        
+        # Привязываем событие смены вкладки для автоматической загрузки данных БД
+        if hasattr(self.gui, 'notebook'):
+            self.gui.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+    
+    def _initialize_database(self):
+        """Инициализация базы данных"""
+        try:
+            # Пытаемся подключиться с параметрами по умолчанию
+            self.db_manager = DatabaseManager(
+                host='localhost',
+                port=5432,
+                user='postgres',
+                password='postgres'
+            )
+            if self.db_manager.initialize_database():
+                print("✅ База данных инициализирована успешно")
+            else:
+                print("\n⚠️ Не удалось инициализировать базу данных")
+                print("\n💡 Возможные причины:")
+                print("   1. PostgreSQL не запущен")
+                print("   2. Неверные параметры подключения (пользователь/пароль)")
+                print("   3. PostgreSQL не установлен")
+                print("\n📝 Для исправления:")
+                print("   - Убедитесь, что PostgreSQL запущен")
+                print("   - Проверьте параметры подключения в unified_main.py")
+                print("   - Или установите PostgreSQL с https://www.postgresql.org/download/")
+                print("\n   Приложение будет работать без базы данных.\n")
+                self.db_manager = None
+        except ImportError:
+            print("\n⚠️ Модуль psycopg2 не установлен")
+            print("   Установите: pip install psycopg2-binary")
+            print("   Приложение будет работать без базы данных.\n")
+            self.db_manager = None
+        except Exception as e:
+            error_msg = str(e).strip()
+            print(f"\n⚠️ Ошибка инициализации базы данных: {error_msg}")
+            print("   Приложение будет работать без базы данных.\n")
+            self.db_manager = None
+    
+    def get_database_data(self, table_name):
+        """Получение данных из базы данных для GUI"""
+        if not self.db_manager:
+            return []
+        
+        try:
+            if table_name == "Sport":
+                return self.db_manager.get_all_sports()
+            elif table_name == "Asser_types":
+                return self.db_manager.get_all_asset_types()
+            elif table_name == "Pack":
+                return self.db_manager.get_all_packs()
+            else:
+                return []
+        except Exception as e:
+            print(f"❌ Ошибка получения данных из БД: {e}")
+            return []
+    
+    def add_database_data(self, table_name, **kwargs):
+        """Добавление данных в базу данных"""
+        if not self.db_manager:
+            return False
+        
+        try:
+            if table_name == "Sport":
+                name = kwargs.get('name', '')
+                return self.db_manager.add_sport(name)
+            elif table_name == "Asser_types":
+                name = kwargs.get('name', '')
+                return self.db_manager.add_asset_type(name)
+            elif table_name == "Pack":
+                name = kwargs.get('name', '')
+                fk_type_id = kwargs.get('fk_type_id', 0)
+                json_file_path = kwargs.get('json_file_path', '')
+                fk_sport_id = kwargs.get('fk_sport_id', 0)
+                return self.db_manager.add_pack(name, fk_type_id, json_file_path, fk_sport_id)
+            else:
+                return False
+        except Exception as e:
+            print(f"❌ Ошибка добавления данных в БД: {e}")
+            return False
+    
+    def load_settings_from_json(self, json_path):
+        """Загрузка настроек из JSON файла"""
+        try:
+            if self.gui and hasattr(self.gui, 'load_settings'):
+                return self.gui.load_settings(json_path)
+            else:
+                return False
+        except Exception as e:
+            print(f"❌ Ошибка загрузки настроек из JSON: {e}")
+            return False
+    
+    def _on_tab_changed(self, event):
+        """Обработчик смены вкладки - автоматически загружает данные БД"""
+        if not hasattr(self.gui, 'notebook'):
+            return
+        
+        selected_tab = self.gui.notebook.index(self.gui.notebook.select())
+        # Если выбрана вкладка БД (индекс 1), обновляем все таблицы
+        if selected_tab == 1:
+            self.root.after(100, self._refresh_all_database_tables)
+    
+    def _refresh_all_database_tables(self):
+        """Обновление всех таблиц БД"""
+        if self.gui and hasattr(self.gui, 'refresh_table'):
+            self.gui.refresh_table("Sport")
+            self.gui.refresh_table("Asser_types")
+            self.gui.refresh_table("Pack")
     
     def _load_cached_logos(self):
         """Загрузка PNG изображений в кэш (один раз при инициализации)"""
@@ -1418,6 +1537,10 @@ class UnifiedTrackingApp:
             if not messagebox.askyesno("Выход", "Остановить стриминг и выйти?"):
                 return
             self.stop_processing()
+        
+        # Закрываем соединение с БД
+        if self.db_manager:
+            self.db_manager.close()
             
         self.root.quit()
         self.root.destroy()
