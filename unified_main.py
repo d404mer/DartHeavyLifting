@@ -764,12 +764,12 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     overlay = frame.copy()
     
     # Параметры статичной подложки
-    panel_width = 500
-    panel_height = 800
-    panel_x = 1220  # правая часть экрана
-    panel_y = (h - panel_height) // 2  # по центру по вертикали
-    panel_color = (220, 220, 220)  # белый цвет
-    alpha = 0.3  # 30% прозрачность
+    # panel_width = 500
+    # panel_height = 800
+    # panel_x = 500  # правая часть экрана
+    # panel_y = (h - panel_height) // 2  # по центру по вертикали
+    # panel_color = (220, 220, 220)  # белый цвет
+    # alpha = 0.3  # 30% прозрачность
 
     # Рисуем полупрозрачную плашку (только если человек в активной зоне)
     panel_overlay = overlay.copy()
@@ -795,9 +795,9 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
     # Отрисовываем скелет в координатах (+650). лучше 670
     for limb, (a, b, c) in limbs.items():
         try:
-            pa = (int(landmarks[a].x * w + 760), int(landmarks[a].y * h))
-            pb = (int(landmarks[b].x * w + 760), int(landmarks[b].y * h))
-            pc = (int(landmarks[c].x * w + 760), int(landmarks[c].y * h))
+            pa = (int(landmarks[a].x * w + 360), int(landmarks[a].y * h))
+            pb = (int(landmarks[b].x * w + 360), int(landmarks[b].y * h))
+            pc = (int(landmarks[c].x * w + 360), int(landmarks[c].y * h))
         except (IndexError, AttributeError):
             continue
         
@@ -829,7 +829,7 @@ def draw_overlay(frame, landmarks, angles, bone_color, joint_color, bone_width, 
         # Рисуем суставы
         for idx in [a, b, c]:
             try:
-                x, y = int(landmarks[idx].x * w + 760), int(landmarks[idx].y * h)
+                x, y = int(landmarks[idx].x * w + 360), int(landmarks[idx].y * h)
                 cv2.circle(overlay, (x, y), joint_radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
                 cv2.circle(overlay, (x, y), joint_radius, joint_bgr, -1, cv2.LINE_AA)
             except (IndexError, AttributeError):
